@@ -857,7 +857,7 @@ export function PricingDashboard() {
                   };
                   const body = sorted.map(({ row, calc }) =>
                     [row.fsnId, row.weightUnit, row.ncSkuId, row.ncSkuName, row.subcategory, row.conversionFactor,
-                     row.demandUnits, calc.totalDemandPct?.toFixed(2), row.grnPricePerKg ?? "",
+                     row.demandUnits, calc.totalDemandPct?.toFixed(3), row.grnPricePerKg ?? "",
                      calc.grnPerUnit?.toFixed(2) ?? "", row.prevDayGrnPerUnit ?? "", calc.grnDiff?.toFixed(2) ?? "",
                      row.blinkitSp ?? "", row.adjustedGrn ?? 0, row.quotedPp, row.negotiatedPp,
                      calc.nlc.toFixed(2), calc.piPct?.toFixed(2) ?? "", calc.gm?.toFixed(2) ?? "",
