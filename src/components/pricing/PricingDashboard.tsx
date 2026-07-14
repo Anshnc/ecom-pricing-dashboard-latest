@@ -856,11 +856,11 @@ export function PricingDashboard() {
           </div>
 
           {/* Table */}
-          <div className="overflow-hidden rounded-md border bg-card">
-
-            <div className="flex">
-              {/* Frozen — 40%, immovable, no horizontal scroll */}
-              <div className="w-auto shrink-0 border-r-2 border-border bg-card">
+          <div className="rounded-md border bg-card">
+            <div className="max-h-[calc(100vh-14rem)] overflow-auto">
+            <div className="flex w-max min-w-full">
+              {/* Frozen — immovable on horizontal scroll */}
+              <div className="sticky left-0 z-30 w-auto shrink-0 border-r-2 border-border bg-card">
 
 
                 <FrozenTable
@@ -871,8 +871,8 @@ export function PricingDashboard() {
                   averages={averages}
                 />
               </div>
-              {/* Scrollable — 60% */}
-              <div className="min-w-0 flex-1 overflow-x-auto">
+              {/* Scrollable */}
+              <div className="min-w-0 flex-1">
                 <ScrollTable
                   rows={pageRows}
                   sortKey={sortKey}
@@ -883,6 +883,7 @@ export function PricingDashboard() {
                   submitted={submitted}
                 />
               </div>
+            </div>
             </div>
           </div>
 
@@ -1219,6 +1220,12 @@ function SubCategoryMetricsModal({
 const COL_HEAD_H = "h-9";
 const SUB_HEAD_H = "h-7";
 const ROW_H = "h-10";
+const STICKY_GROUP = "sticky top-0 z-20";
+const STICKY_COL = "sticky top-6 z-20";
+const STICKY_AVG = "sticky top-[60px] z-20";
+const STICKY_FROZEN_GROUP = "sticky top-0 left-0 z-30";
+const STICKY_FROZEN_COL = "sticky top-6 left-0 z-30";
+const STICKY_FROZEN_AVG = "sticky top-[60px] left-0 z-30";
 
 type Enriched = { row: SkuRow; calc: ReturnType<typeof deriveRow> };
 
@@ -1240,17 +1247,17 @@ function FrozenTable({
     <table className="w-auto border-collapse text-[12px] [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
 
 
-      <thead className="sticky top-0 z-10 bg-card">
+      <thead>
         <tr>
-          <th colSpan={3} className="h-6 border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Basic Information</th>
+          <th colSpan={3} className={`${STICKY_FROZEN_GROUP} h-6 border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information</th>
         </tr>
-        <tr className={`${COL_HEAD_H} border-b bg-card`}>
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">FSN ID</th>
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Weight Unit</th>
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">NC SKU Name</th>
+        <tr className={`${COL_HEAD_H} border-b`}>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>FSN ID</th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Weight Unit</th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>NC SKU Name</th>
         </tr>
-        <tr className={`${SUB_HEAD_H} border-b bg-accent/30 text-[11px] font-medium`}>
-          <td colSpan={3} className="px-2 text-muted-foreground">Averages →</td>
+        <tr className={`${SUB_HEAD_H} border-b text-[11px] font-medium`}>
+          <td colSpan={3} className={`${STICKY_FROZEN_AVG} bg-accent px-2 text-muted-foreground`}>Averages →</td>
         </tr>
       </thead>
       <tbody>
@@ -1300,66 +1307,66 @@ function ScrollTable({
         {/* Benchmark Info (12) */}
         <col style={{ width: 90 }} /><col style={{ width: 80 }} /><col style={{ width: 120 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} />
       </colgroup>
-      <thead className="sticky top-0 z-10 bg-card">
+      <thead>
         <tr className="h-6">
-          <th colSpan={3} className="h-6 border-b bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Basic Information (cont.)</th>
-          <th colSpan={8} className="h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Demand Information</th>
-          <th colSpan={12} className="h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Benchmark Information</th>
+          <th colSpan={3} className={`${STICKY_GROUP} h-6 border-b bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information (cont.)</th>
+          <th colSpan={8} className={`${STICKY_GROUP} h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
+          <th colSpan={12} className={`${STICKY_GROUP} h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Benchmark Information</th>
         </tr>
 
-        <tr className={`${COL_HEAD_H} border-b bg-card`}>
+        <tr className={`${COL_HEAD_H} border-b`}>
           {/* Basic Info cont. */}
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Special Tags</th>
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Subcategory</th>
-          <th className="px-2 text-right align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Conv. Factor</th>
+          <th className={`${STICKY_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Special Tags</th>
+          <th className={`${STICKY_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Subcategory</th>
+          <th className={`${STICKY_COL} bg-card px-2 text-right align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Conv. Factor</th>
           {/* Demand Info */}
-          <th className="border-l px-2 align-middle"><SortHeader align="right" label="Demand Units" active={sortKey==="demandUnits"} dir={sortDir} onClick={() => toggleSort("demandUnits")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Total Demand %" active={sortKey==="totalDemandPct"} dir={sortDir} onClick={() => toggleSort("totalDemandPct")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="NLC Value Mix" active={sortKey==="nlcValueMix"} dir={sortDir} onClick={() => toggleSort("nlcValueMix")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="GRN ₹/kg" active={sortKey==="grnPricePerKg"} dir={sortDir} onClick={() => toggleSort("grnPricePerKg")} /></th>
-          <th className="px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"><Tip text="GRN ₹/unit on day T-n-1 (previous day). Read-only.">Prev Day GRN ₹/unit</Tip></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="GRN ₹/unit" active={sortKey==="grnPerUnit"} dir={sortDir} onClick={() => toggleSort("grnPerUnit")} /></th>
-          <th className="px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"><Tip text="(GRN ₹/unit + Adjusted GRN) − Prev Day GRN ₹/unit">GRN Diff</Tip></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Adjusted GRN" active={sortKey==="adjustedGrn"} dir={sortDir} onClick={() => toggleSort("adjustedGrn")} /></th>
+          <th className={`${STICKY_COL} border-l bg-card px-2 align-middle`}><SortHeader align="right" label="Demand Units" active={sortKey==="demandUnits"} dir={sortDir} onClick={() => toggleSort("demandUnits")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Total Demand %" active={sortKey==="totalDemandPct"} dir={sortDir} onClick={() => toggleSort("totalDemandPct")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="NLC Value Mix" active={sortKey==="nlcValueMix"} dir={sortDir} onClick={() => toggleSort("nlcValueMix")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="GRN ₹/kg" active={sortKey==="grnPricePerKg"} dir={sortDir} onClick={() => toggleSort("grnPricePerKg")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}><Tip text="GRN ₹/unit on day T-n-1 (previous day). Read-only.">Prev Day GRN ₹/unit</Tip></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="GRN ₹/unit" active={sortKey==="grnPerUnit"} dir={sortDir} onClick={() => toggleSort("grnPerUnit")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}><Tip text="(GRN ₹/unit + Adjusted GRN) − Prev Day GRN ₹/unit">GRN Diff</Tip></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Adjusted GRN" active={sortKey==="adjustedGrn"} dir={sortDir} onClick={() => toggleSort("adjustedGrn")} /></th>
           {/* Benchmark Info */}
-          <th className="border-l px-2 align-middle"><SortHeader align="right" label="Blinkit SP" active={sortKey==="blinkitSp"} dir={sortDir} onClick={() => toggleSort("blinkitSp")} /></th>
-          <th className="px-2 align-middle text-center text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">WSP Trend</th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Quoted PP" active={sortKey==="quotedPp"} dir={sortDir} onClick={() => toggleSort("quotedPp")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Negotiated PP" active={sortKey==="negotiatedPp"} dir={sortDir} onClick={() => toggleSort("negotiatedPp")} /></th>
-          <th className="px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Suggested PP</th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="NLC" active={sortKey==="nlc"} dir={sortDir} onClick={() => toggleSort("nlc")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="PI %" active={sortKey==="piPct"} dir={sortDir} onClick={() => toggleSort("piPct")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="GM" active={sortKey==="gm"} dir={sortDir} onClick={() => toggleSort("gm")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Deflection %" active={sortKey==="priceDeflectionPct"} dir={sortDir} onClick={() => toggleSort("priceDeflectionPct")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Impact PP Diff" active={sortKey==="impactPpDiff"} dir={sortDir} onClick={() => toggleSort("impactPpDiff")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Impact GM" active={sortKey==="impactGm"} dir={sortDir} onClick={() => toggleSort("impactGm")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="BK Value Mix" active={sortKey==="valueMix"} dir={sortDir} onClick={() => toggleSort("valueMix")} /></th>
+          <th className={`${STICKY_COL} border-l bg-card px-2 align-middle`}><SortHeader align="right" label="Blinkit SP" active={sortKey==="blinkitSp"} dir={sortDir} onClick={() => toggleSort("blinkitSp")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle text-center text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>WSP Trend</th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Quoted PP" active={sortKey==="quotedPp"} dir={sortDir} onClick={() => toggleSort("quotedPp")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Negotiated PP" active={sortKey==="negotiatedPp"} dir={sortDir} onClick={() => toggleSort("negotiatedPp")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Suggested PP</th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="NLC" active={sortKey==="nlc"} dir={sortDir} onClick={() => toggleSort("nlc")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="PI %" active={sortKey==="piPct"} dir={sortDir} onClick={() => toggleSort("piPct")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="GM" active={sortKey==="gm"} dir={sortDir} onClick={() => toggleSort("gm")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Deflection %" active={sortKey==="priceDeflectionPct"} dir={sortDir} onClick={() => toggleSort("priceDeflectionPct")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Impact PP Diff" active={sortKey==="impactPpDiff"} dir={sortDir} onClick={() => toggleSort("impactPpDiff")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Impact GM" active={sortKey==="impactGm"} dir={sortDir} onClick={() => toggleSort("impactGm")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="BK Value Mix" active={sortKey==="valueMix"} dir={sortDir} onClick={() => toggleSort("valueMix")} /></th>
         </tr>
         {/* Averages */}
-        <tr className={`${SUB_HEAD_H} border-b bg-accent/30 text-[11px] font-medium`}>
-          <td className="px-2 text-muted-foreground" colSpan={3}>Averages →</td>
+        <tr className={`${SUB_HEAD_H} border-b text-[11px] font-medium`}>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-muted-foreground`} colSpan={3}>Averages →</td>
           {/* Demand */}
-          <td className="border-l px-2 text-right tabular-nums">{averages.demandUnits !== null ? Math.round(averages.demandUnits).toLocaleString() : "—"}</td>
-          <td className="px-2 text-right tabular-nums">{averages.totalDemandPct !== null ? `${averages.totalDemandPct.toFixed(3)}%` : "—"}</td>
-          <td className="px-2 text-right tabular-nums">{averages.nlcValueMix !== null ? `₹${Math.round(averages.nlcValueMix).toLocaleString()}` : "—"}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.grnPricePerKg)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.prevDayGrnPerUnit)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.grnPerUnit)}</td>
-          <td className="px-2 text-right tabular-nums">{averages.grnDiff !== null ? `${averages.grnDiff >= 0 ? "+" : ""}${averages.grnDiff.toFixed(2)}` : "—"}</td>
-          <td className="px-2 text-right tabular-nums">{averages.adjustedGrn !== null ? `${averages.adjustedGrn >= 0 ? "+" : ""}${averages.adjustedGrn.toFixed(2)}` : "—"}</td>
+          <td className={`${STICKY_AVG} border-l bg-accent px-2 text-right tabular-nums`}>{averages.demandUnits !== null ? Math.round(averages.demandUnits).toLocaleString() : "—"}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.totalDemandPct !== null ? `${averages.totalDemandPct.toFixed(3)}%` : "—"}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.nlcValueMix !== null ? `₹${Math.round(averages.nlcValueMix).toLocaleString()}` : "—"}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.grnPricePerKg)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.prevDayGrnPerUnit)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.grnPerUnit)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.grnDiff !== null ? `${averages.grnDiff >= 0 ? "+" : ""}${averages.grnDiff.toFixed(2)}` : "—"}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.adjustedGrn !== null ? `${averages.adjustedGrn >= 0 ? "+" : ""}${averages.adjustedGrn.toFixed(2)}` : "—"}</td>
           {/* Benchmark */}
-          <td className="border-l px-2 text-right tabular-nums">{fmt(averages.blinkitSp)}</td>
-          <td className="px-2 text-center text-muted-foreground">—</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.quotedPp)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.negotiatedPp)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.suggestedPp)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.nlc)}</td>
-          <td className="px-2 text-right tabular-nums">{num(averages.piPct)}%</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.gm)}</td>
-          <td className="px-2 text-right tabular-nums">{num(averages.priceDeflectionPct)}%</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.impactPpDiff)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.impactGm)}</td>
-          <td className="px-2 text-right tabular-nums">{averages.valueMix !== null ? `₹${Math.round(averages.valueMix).toLocaleString()}` : "—"}</td>
+          <td className={`${STICKY_AVG} border-l bg-accent px-2 text-right tabular-nums`}>{fmt(averages.blinkitSp)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-center text-muted-foreground`}>—</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.quotedPp)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.negotiatedPp)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.suggestedPp)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.nlc)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{num(averages.piPct)}%</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.gm)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{num(averages.priceDeflectionPct)}%</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.impactPpDiff)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.impactGm)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.valueMix !== null ? `₹${Math.round(averages.valueMix).toLocaleString()}` : "—"}</td>
         </tr>
       </thead>
 
