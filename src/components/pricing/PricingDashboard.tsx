@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
 import { usePricingSheet } from "@/hooks/usePricingSheet";
+import { useSubcategories } from "@/hooks/useSubcategories";
 import { useGuardrails } from "@/hooks/useGuardrails";
 import { parseCSV, toNum, toInt } from "@/lib/csv";
 import {
@@ -26,6 +27,7 @@ import {
   FileSpreadsheet,
   Calendar,
   Filter,
+  Layers,
   Check,
   Maximize2,
   Minimize2,
@@ -330,6 +332,7 @@ export function PricingDashboard() {
   // Live-load pricing_sheet rows for the selected city + delivery date.
   const { rows: dbRows, updateRow: dbUpdateRow, submitSheet: dbSubmit, refetch: dbRefetch } =
     usePricingSheet({ city, deliveryDate });
+  const { subcategoryNames, resolveSubcategory } = useSubcategories();
 
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const SAVE_MAP: Record<string, keyof PricingSheetRow> = {
@@ -399,7 +402,9 @@ export function PricingDashboard() {
   const [showFab, setShowFab] = useState(false);
   const [search, setSearch] = useState("");
   const [violationFilters, setViolationFilters] = useState<Set<string>>(new Set());
+  const [subcategoryFilters, setSubcategoryFilters] = useState<Set<string>>(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
+  const [subcatFilterOpen, setSubcatFilterOpen] = useState(false);
   const [sheetFullscreen, setSheetFullscreen] = useState(false);
   const [tableZoom, setTableZoom] = useState(TABLE_ZOOM_MAX);
 
@@ -441,12 +446,17 @@ export function PricingDashboard() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const fs = violationFilters;
+    const subs = subcategoryFilters;
     return enriched.filter(({ row, calc }) => {
       if (q && !(
         row.fsnId.toLowerCase().includes(q) ||
         row.ncSkuId.toLowerCase().includes(q) ||
         row.ncSkuName.toLowerCase().includes(q)
       )) return false;
+      if (subs.size > 0) {
+        const sub = resolveSubcategory(row.fsnId, row.ncSkuId, row.subcategory);
+        if (!sub || !subs.has(sub)) return false;
+      }
       if (fs.size === 0) return true;
       if (fs.has("neg_pi") && calc.piPct !== null && calc.piPct < 0) return true;
       if (fs.has("neg_gm") && calc.gm !== null && calc.gm < 0) return true;
@@ -456,7 +466,7 @@ export function PricingDashboard() {
       if (fs.has("high_deflection") && row.priceDeflectionPct > 8) return true;
       return false;
     });
-  }, [enriched, search, violationFilters]);
+  }, [enriched, search, violationFilters, subcategoryFilters, resolveSubcategory]);
 
   const sorted = useMemo(() => {
     if (!sortKey || !sortDir) return filtered;
@@ -489,6 +499,15 @@ export function PricingDashboard() {
   }, [filtered, sortKey, sortDir]);
 
   const averages = useMemo(() => computePriceUploadAverages(enriched), [enriched]);
+
+  const subcategoryOptions = useMemo(() => {
+    const fromRows = new Set<string>();
+    for (const r of rows) {
+      const sub = resolveSubcategory(r.fsnId, r.ncSkuId, r.subcategory);
+      if (sub) fromRows.add(sub);
+    }
+    return Array.from(new Set([...subcategoryNames, ...fromRows])).sort((a, b) => a.localeCompare(b));
+  }, [subcategoryNames, rows, resolveSubcategory]);
 
   const toggleSort = (key: string) => {
     if (sortKey !== key) { setSortKey(key); setSortDir("asc"); return; }
@@ -974,9 +993,60 @@ export function PricingDashboard() {
                 </div>
               )}
             </div>
-            {violationFilters.size > 0 && (
+            <div className="relative">
               <button
-                onClick={() => setViolationFilters(new Set())}
+                onClick={() => setSubcatFilterOpen((o) => !o)}
+                className="inline-flex h-8 items-center gap-2 rounded-md border border-input bg-card px-3 text-[12px] font-medium hover:bg-muted"
+              >
+                <Layers className="h-3.5 w-3.5 text-muted-foreground" />
+                <span>Subcategory</span>
+                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  {subcategoryFilters.size === 0 ? "All" : `${subcategoryFilters.size} selected`}
+                </span>
+                <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+              </button>
+              {subcatFilterOpen && (
+                <div className={`absolute left-0 top-9 max-h-72 w-64 overflow-y-auto rounded-md border bg-card p-2 shadow-lg ${sheetFullscreen ? "z-[60]" : "z-30"}`}>
+                  <div className="mb-1 flex items-center justify-between px-1">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Subcategory</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setSubcategoryFilters(new Set(subcategoryOptions))}
+                        className="text-[11px] text-primary hover:underline"
+                      >Select All</button>
+                      <button
+                        onClick={() => setSubcategoryFilters(new Set())}
+                        className="text-[11px] text-muted-foreground hover:underline"
+                      >Clear</button>
+                    </div>
+                  </div>
+                  <div className="flex flex-col">
+                    {subcategoryOptions.length === 0 ? (
+                      <span className="px-2 py-1.5 text-[12px] text-muted-foreground">No subcategories found</span>
+                    ) : (
+                      subcategoryOptions.map((name) => {
+                        const checked = subcategoryFilters.has(name);
+                        return (
+                          <button
+                            key={name}
+                            onClick={() => setSubcategoryFilters((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n; })}
+                            className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[12px] hover:bg-muted"
+                          >
+                            <span className={`grid h-4 w-4 shrink-0 place-items-center rounded-sm border ${checked ? "border-primary bg-primary text-primary-foreground" : "border-input bg-card"}`}>
+                              {checked && <Check className="h-3 w-3" />}
+                            </span>
+                            <span>{name}</span>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            {(violationFilters.size > 0 || subcategoryFilters.size > 0) && (
+              <button
+                onClick={() => { setViolationFilters(new Set()); setSubcategoryFilters(new Set()); }}
                 className="text-[11px] text-primary hover:underline"
               >
                 Clear filters

@@ -68,6 +68,12 @@ export type PricingSheetRow = {
   updated_at?: string | null;
 };
 
+export type SubcategoryRow = {
+  subcategory: string;
+  sku_id: string;
+  fsn_id: string;
+};
+
 export type GuardrailRow = {
   city: string;
   pi_min: number | null;
