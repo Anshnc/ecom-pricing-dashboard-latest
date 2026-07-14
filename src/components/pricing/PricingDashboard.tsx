@@ -45,6 +45,7 @@ type SkuRow = {
   demandUnits: number;
   piMixPct: number;
   grnPricePerKg: number | null;
+  prevDayGrnPerKg?: number | null;
   prevDayGrnPerUnit?: number | null;
   grnLocked?: boolean;
   grnWarning?: boolean;
@@ -120,6 +121,7 @@ function dbToSku(r: PricingSheetRow): SkuRow {
     demandUnits: r.demand_units ?? 0,
     piMixPct: r.demand_pct ?? 0,
     grnPricePerKg: r.grn_price_per_kg,
+    prevDayGrnPerKg: r.prev_grn_price_per_kg,
     prevDayGrnPerUnit: r.prev_grn_price_per_unit,
     grnLocked: true,
     grnWarning: r.grn_price_per_kg === null,
@@ -163,6 +165,68 @@ function deriveRow(r: SkuRow, totalDemand: number) {
   const valueMix = r.blinkitSp !== null ? r.blinkitSp * r.demandUnits : null;
   const nlcValueMix = nlc * r.demandUnits;
   return { grnPerUnit, prevDayGrnPerUnit: r.prevDayGrnPerUnit ?? null, grnDiff, nlc, piPct, gm, totalDemandPct, impactPpDiff, impactGm, valueMix, nlcValueMix };
+}
+
+type Enriched = { row: SkuRow; calc: ReturnType<typeof deriveRow> };
+
+function plainSum(
+  enriched: Enriched[],
+  getValue: (e: Enriched) => number | null | undefined,
+): number | null {
+  let sum = 0;
+  let has = false;
+  for (const e of enriched) {
+    const v = getValue(e);
+    if (v === null || v === undefined) continue;
+    sum += v;
+    has = true;
+  }
+  return has ? sum : null;
+}
+
+function weightedByDemandPct(
+  enriched: Enriched[],
+  getValue: (e: Enriched) => number | null | undefined,
+): number | null {
+  let weightedSum = 0;
+  let weightSum = 0;
+  for (const e of enriched) {
+    const v = getValue(e);
+    if (v === null || v === undefined) continue;
+    const w = e.calc.totalDemandPct;
+    weightedSum += v * w;
+    weightSum += w;
+  }
+  return weightSum > 0 ? weightedSum / weightSum : null;
+}
+
+/** Price Upload Averages — always computed over the full basket (all SKUs), never filtered rows. */
+function computePriceUploadAverages(enriched: Enriched[]) {
+  const wNlc = weightedByDemandPct(enriched, (e) => e.calc.nlc);
+  const wGrnPerUnit = weightedByDemandPct(enriched, (e) => e.calc.grnPerUnit);
+
+  return {
+    demandUnits: plainSum(enriched, (e) => e.row.demandUnits),
+    totalDemandPct: plainSum(enriched, (e) => e.calc.totalDemandPct),
+    grnPricePerKg: weightedByDemandPct(enriched, (e) => e.row.grnPricePerKg),
+    grnPerUnit: wGrnPerUnit,
+    prevDayGrnPerKg: weightedByDemandPct(enriched, (e) => e.row.prevDayGrnPerKg ?? null),
+    prevDayGrnPerUnit: weightedByDemandPct(enriched, (e) => e.calc.prevDayGrnPerUnit),
+    blinkitSp: weightedByDemandPct(enriched, (e) => e.row.blinkitSp),
+    nlc: wNlc,
+    piPct: weightedByDemandPct(enriched, (e) => e.calc.piPct),
+    priceDeflectionPct: weightedByDemandPct(enriched, (e) => e.row.priceDeflectionPct),
+    impactPpDiff: plainSum(enriched, (e) => e.calc.impactPpDiff),
+    impactGm: plainSum(enriched, (e) => e.calc.impactGm),
+    valueMix: weightedByDemandPct(enriched, (e) => e.calc.valueMix),
+    gm: wNlc !== null && wGrnPerUnit !== null ? wNlc - wGrnPerUnit : null,
+    nlcValueMix: null as number | null,
+    grnDiff: null as number | null,
+    adjustedGrn: null as number | null,
+    quotedPp: null as number | null,
+    negotiatedPp: null as number | null,
+    suggestedPp: null as number | null,
+  };
 }
 
 // ---------- Tooltip ----------
@@ -345,35 +409,9 @@ export function PricingDashboard() {
     });
   }, [filtered, sortKey, sortDir]);
 
-  const averages = useMemo(() => {
-    const valid = (arr: (number | null)[]) => arr.filter((x): x is number => x !== null);
-    const avg = (arr: number[]) => (arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null);
-    const src = sorted;
-    return {
-      demandUnits: avg(src.map((e) => e.row.demandUnits)),
-      totalDemandPct: avg(src.map((e) => e.calc.totalDemandPct)),
-      piMixPct: avg(src.map((e) => e.row.piMixPct)),
-      grnPricePerKg: avg(valid(src.map((e) => e.row.grnPricePerKg))),
-      grnPerUnit: avg(valid(src.map((e) => e.calc.grnPerUnit))),
-      prevDayGrnPerUnit: avg(valid(src.map((e) => e.calc.prevDayGrnPerUnit))),
-      grnDiff: avg(valid(src.map((e) => e.calc.grnDiff))),
-      adjustedGrn: avg(src.map((e) => e.row.adjustedGrn ?? 0)),
-      blinkitSp: avg(valid(src.map((e) => e.row.blinkitSp))),
-      quotedPp: avg(src.map((e) => e.row.quotedPp)),
-      negotiatedPp: avg(src.map((e) => e.row.negotiatedPp)),
-      suggestedPp: avg(valid(src.map((e) => e.row.suggestedPp))),
-      nlc: avg(src.map((e) => e.calc.nlc)),
-      piPct: avg(valid(src.map((e) => e.calc.piPct))),
-      gm: avg(valid(src.map((e) => e.calc.gm))),
-      priceDeflectionPct: avg(src.map((e) => e.row.priceDeflectionPct)),
-      impactPpDiff: avg(valid(src.map((e) => e.calc.impactPpDiff))),
-      impactGm: avg(valid(src.map((e) => e.calc.impactGm))),
-      valueMix: avg(valid(src.map((e) => e.calc.valueMix))),
-      nlcValueMix: avg(src.map((e) => e.calc.nlcValueMix)),
-    };
-  }, [sorted]);
+  const averages = useMemo(() => computePriceUploadAverages(enriched), [enriched]);
 
-  // Pagination (applied on top of filtered+sorted; averages stay from full set).
+  // Pagination (applied on top of filtered+sorted; averages use full enriched set).
   const [pageSize, setPageSize] = useState<number>(25);
   const [page, setPage] = useState<number>(1);
   useEffect(() => { setPage(1); }, [search, violationFilters, pageSize, city, deliveryDate]);
@@ -1226,8 +1264,6 @@ const STICKY_AVG = "sticky top-[60px] z-20";
 const STICKY_FROZEN_GROUP = "sticky top-0 left-0 z-30";
 const STICKY_FROZEN_COL = "sticky top-6 left-0 z-30";
 const STICKY_FROZEN_AVG = "sticky top-[60px] left-0 z-30";
-
-type Enriched = { row: SkuRow; calc: ReturnType<typeof deriveRow> };
 
 function GroupBar({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
