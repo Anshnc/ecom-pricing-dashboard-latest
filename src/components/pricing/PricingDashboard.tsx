@@ -779,7 +779,7 @@ export function PricingDashboard() {
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search FSN ID, NC SKU ID, SKU name..."
+                placeholder="Search FSN ID, SKU name..."
                 className="h-8 w-80 rounded-md border border-input bg-card pl-7 pr-2 text-[12px] outline-none focus:border-primary"
               />
             </div>
@@ -1247,7 +1247,7 @@ function FrozenTable({
         <tr className={`${COL_HEAD_H} border-b bg-card`}>
           <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">FSN ID</th>
           <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Weight Unit</th>
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">NC SKU ID</th>
+          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">NC SKU Name</th>
         </tr>
         <tr className={`${SUB_HEAD_H} border-b bg-accent/30 text-[11px] font-medium`}>
           <td colSpan={3} className="px-2 text-muted-foreground">Averages →</td>
@@ -1267,7 +1267,7 @@ function FrozenTable({
             <tr key={row.fsnId} className={`${ROW_H} border-b last:border-b-0 hover:bg-muted/40 ${rowCls}`}>
               <td className="whitespace-nowrap px-2 font-mono text-[11px] text-muted-foreground">{row.fsnId}</td>
               <td className="whitespace-nowrap px-2 text-muted-foreground">{row.weightUnit}</td>
-              <td className="truncate px-2 font-mono text-[11px]">{row.ncSkuId}</td>
+              <td className="max-w-[200px] truncate px-2 text-[11px]">{row.ncSkuName || "—"}</td>
 
 
             </tr>
