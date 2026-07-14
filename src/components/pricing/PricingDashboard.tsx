@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useMemo, useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
 import { usePricingSheet } from "@/hooks/usePricingSheet";
 import { useGuardrails } from "@/hooks/useGuardrails";
@@ -331,6 +331,15 @@ export function PricingDashboard() {
   const { rows: dbRows, updateRow: dbUpdateRow, submitSheet: dbSubmit, refetch: dbRefetch } =
     usePricingSheet({ city, deliveryDate });
 
+  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const SAVE_MAP: Record<string, keyof PricingSheetRow> = {
+    blinkitSp: "blinkit_sp",
+    quotedPp: "quoted_pp",
+    negotiatedPp: "negotiated_pp",
+    adjustedGrn: "adjusted_grn",
+    grnPricePerKg: "grn_price_per_kg",
+  };
+
   useEffect(() => {
     // Merge DB rows into local rows so client-only fields (touched, acks) and
     // in-flight edits still awaiting a Supabase write don't get clobbered.
@@ -343,28 +352,31 @@ export function PricingDashboard() {
         if (!p) return fresh;
         const pendingKey = fresh.fsnId;
         const hasPending = !!saveTimers.current[pendingKey];
-        // Preserve client-only bookkeeping always.
+        const editing =
+          !p.grnLocked ||
+          !p.blinkitLocked ||
+          !p.adjustedGrnLocked ||
+          !p.quotedLocked ||
+          !p.negotiatedLocked;
         const merged: SkuRow = {
           ...fresh,
+          grnLocked: p.grnLocked,
+          blinkitLocked: p.blinkitLocked,
+          adjustedGrnLocked: p.adjustedGrnLocked,
+          quotedLocked: p.quotedLocked,
+          negotiatedLocked: p.negotiatedLocked,
           quotedTouched: p.quotedTouched,
           negotiatedTouched: p.negotiatedTouched,
           lastLockedNegotiated: p.lastLockedNegotiated,
           suggestionAcknowledgedAt: p.suggestionAcknowledgedAt,
           suggestedPp: p.suggestedPp,
         };
-        // If a save is in-flight for this row, keep local edited values and
-        // lock flags so the round-trip refresh doesn't reset what the user just clicked.
-        if (hasPending) {
-          merged.quotedPp = p.quotedPp;
-          merged.negotiatedPp = p.negotiatedPp;
-          merged.adjustedGrn = p.adjustedGrn;
-          merged.blinkitSp = p.blinkitSp;
-          merged.grnPricePerKg = p.grnPricePerKg;
-          merged.quotedLocked = p.quotedLocked;
-          merged.negotiatedLocked = p.negotiatedLocked;
-          merged.adjustedGrnLocked = p.adjustedGrnLocked;
-          merged.blinkitLocked = p.blinkitLocked;
-          merged.grnLocked = p.grnLocked;
+        if (editing || hasPending) {
+          if (!p.grnLocked || hasPending) merged.grnPricePerKg = p.grnPricePerKg;
+          if (!p.blinkitLocked || hasPending) merged.blinkitSp = p.blinkitSp;
+          if (!p.adjustedGrnLocked || hasPending) merged.adjustedGrn = p.adjustedGrn;
+          if (!p.quotedLocked || hasPending) merged.quotedPp = p.quotedPp;
+          if (!p.negotiatedLocked || hasPending) merged.negotiatedPp = p.negotiatedPp;
         }
         return merged;
       });
@@ -483,18 +495,11 @@ export function PricingDashboard() {
     setSortDir((d) => (d === "asc" ? "desc" : "asc"));
   };
 
-  // Debounced Supabase persistence for edited fields.
-  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const SAVE_MAP: Record<string, keyof PricingSheetRow> = {
-    blinkitSp: "blinkit_sp",
-    quotedPp: "quoted_pp",
-    negotiatedPp: "negotiated_pp",
-    adjustedGrn: "adjusted_grn",
-    grnPricePerKg: "grn_price_per_kg",
-  };
-  const updateRow = (fsnId: string, patch: Partial<SkuRow>) => {
+  const updateRowLocal = (fsnId: string, patch: Partial<SkuRow>) => {
     setRows((rs) => rs.map((r) => (r.fsnId === fsnId ? { ...r, ...patch } : r)));
-    // Build a DB patch of only the persistable edited fields.
+  };
+
+  const persistRowFields = (fsnId: string, weightUnit: string, patch: Partial<SkuRow>) => {
     const dbPatch: Partial<PricingSheetRow> = {};
     for (const [k, col] of Object.entries(SAVE_MAP)) {
       if (k in patch) (dbPatch as Record<string, unknown>)[col] = (patch as Record<string, unknown>)[k];
@@ -503,11 +508,7 @@ export function PricingDashboard() {
     const key = fsnId;
     if (saveTimers.current[key]) clearTimeout(saveTimers.current[key]);
     saveTimers.current[key] = setTimeout(() => {
-      const row = rows.find((r) => r.fsnId === fsnId);
-      dbUpdateRow(
-        { fsn_id: fsnId, weight_unit: row?.weightUnit ?? null },
-        dbPatch,
-      )
+      dbUpdateRow({ fsn_id: fsnId, weight_unit: weightUnit }, dbPatch)
         .catch(async (e) => {
           const { toast } = await import("sonner");
           toast.error(`Save failed: ${(e as Error).message}`);
@@ -611,7 +612,12 @@ export function PricingDashboard() {
   };
 
   const anyUnlockedEdit = rows.some(
-    (r) => (r.quotedTouched && !r.quotedLocked) || (r.negotiatedTouched && !r.negotiatedLocked)
+    (r) =>
+      !(r.grnLocked ?? true) ||
+      !(r.blinkitLocked ?? true) ||
+      !(r.adjustedGrnLocked ?? true) ||
+      !r.quotedLocked ||
+      !r.negotiatedLocked
   );
   const blockedBySuggestion = rows.some(
     (r) => r.suggestedPp !== null && (!r.negotiatedLocked || r.negotiatedPp === r.lastLockedNegotiated && r.suggestionAcknowledgedAt === 0)
@@ -648,6 +654,9 @@ export function PricingDashboard() {
     setRows((rs) =>
       rs.map((r) => ({
         ...r,
+        grnLocked: true,
+        blinkitLocked: true,
+        adjustedGrnLocked: true,
         quotedLocked: true,
         negotiatedLocked: true,
         lastLockedNegotiated: r.negotiatedPp,
@@ -1004,7 +1013,8 @@ export function PricingDashboard() {
                   sortDir={sortDir}
                   toggleSort={toggleSort}
                   averages={averages}
-                  updateRow={updateRow}
+                  updateRowLocal={updateRowLocal}
+                  persistRowFields={persistRowFields}
                   submitted={submitted}
                 />
               </div>
@@ -1416,14 +1426,15 @@ function FrozenTable({
 
 // ---------- Scrollable right table ----------
 function ScrollTable({
-  rows, sortKey, sortDir, toggleSort, averages, updateRow, submitted,
+  rows, sortKey, sortDir, toggleSort, averages, updateRowLocal, persistRowFields, submitted,
 }: {
   rows: Enriched[];
   sortKey: string | null;
   sortDir: SortDir;
   toggleSort: (k: string) => void;
   averages: any;
-  updateRow: (id: string, p: Partial<SkuRow>) => void;
+  updateRowLocal: (id: string, p: Partial<SkuRow>) => void;
+  persistRowFields: (id: string, weightUnit: string, p: Partial<SkuRow>) => void;
   submitted: boolean;
 }) {
   return (
@@ -1497,19 +1508,21 @@ function ScrollTable({
               {/* Demand Info */}
               <td className="px-2 text-right tabular-nums">₹{Math.round(calc.nlcValueMix).toLocaleString()}</td>
 
-              {/* GRN ₹/kg — locked by default; unlock to edit, lock to save */}
+              {/* GRN ₹/kg — locked by default; click field to edit, lock to save */}
               <td className={`px-2 ${row.grnPricePerKg === null ? "bg-warn-bg/40" : ""}`}>
                 <NullableLockedInput
                   value={row.grnPricePerKg}
                   locked={row.grnLocked ?? true}
                   disabled={submitted}
                   warn={row.grnPricePerKg === null}
-                  onChange={(v) => updateRow(row.fsnId, { grnPricePerKg: v })}
+                  onChange={(v) => updateRowLocal(row.fsnId, { grnPricePerKg: v })}
+                  onUnlock={() => updateRowLocal(row.fsnId, { grnLocked: false })}
                   onToggleLock={() => {
                     if (row.grnLocked) {
-                      updateRow(row.fsnId, { grnLocked: false });
+                      updateRowLocal(row.fsnId, { grnLocked: false });
                     } else {
-                      updateRow(row.fsnId, { grnLocked: true, grnPricePerKg: row.grnPricePerKg });
+                      updateRowLocal(row.fsnId, { grnLocked: true });
+                      persistRowFields(row.fsnId, row.weightUnit, { grnPricePerKg: row.grnPricePerKg });
                     }
                   }}
                 />
@@ -1532,42 +1545,49 @@ function ScrollTable({
                   value={row.adjustedGrn ?? 0}
                   locked={row.adjustedGrnLocked ?? true}
                   disabled={submitted}
-                  onChange={(v) => updateRow(row.fsnId, { adjustedGrn: v })}
+                  onChange={(v) => updateRowLocal(row.fsnId, { adjustedGrn: v })}
+                  onUnlock={() => updateRowLocal(row.fsnId, { adjustedGrnLocked: false })}
                   onToggleLock={() => {
                     if (row.adjustedGrnLocked) {
-                      updateRow(row.fsnId, { adjustedGrnLocked: false });
+                      updateRowLocal(row.fsnId, { adjustedGrnLocked: false });
                     } else {
                       const v = row.adjustedGrn ?? 0;
                       const patch: Partial<SkuRow> = { adjustedGrnLocked: true };
+                      const persist: Partial<SkuRow> = { adjustedGrn: v };
                       if (v !== 0 && calc.grnPerUnit !== null) {
                         const newQ = calc.grnPerUnit + v;
                         patch.quotedPp = newQ;
                         patch.quotedTouched = true;
+                        persist.quotedPp = newQ;
                         if (row.negotiatedLocked || !row.negotiatedTouched) {
                           patch.negotiatedPp = newQ;
                           patch.lastLockedNegotiated = newQ;
+                          persist.negotiatedPp = newQ;
                         }
                       }
-                      updateRow(row.fsnId, patch);
+                      updateRowLocal(row.fsnId, patch);
+                      persistRowFields(row.fsnId, row.weightUnit, persist);
                     }
                   }}
                 />
               </td>
 
               {/* Benchmark Info */}
-              {/* Blinkit SP — locked by default; unlock to edit, lock to save */}
+              {/* Blinkit SP — locked by default; click field to edit, lock to save */}
               <td className={`border-l px-2 ${row.blinkitSp === null ? "bg-warn-bg/40" : ""}`}>
                 <NullableLockedInput
                   value={row.blinkitSp}
                   locked={row.blinkitLocked ?? true}
                   disabled={submitted}
                   warn={row.blinkitSp === null}
-                  onChange={(v) => updateRow(row.fsnId, { blinkitSp: v })}
+                  onChange={(v) => updateRowLocal(row.fsnId, { blinkitSp: v })}
+                  onUnlock={() => updateRowLocal(row.fsnId, { blinkitLocked: false })}
                   onToggleLock={() => {
                     if (row.blinkitLocked) {
-                      updateRow(row.fsnId, { blinkitLocked: false });
+                      updateRowLocal(row.fsnId, { blinkitLocked: false });
                     } else {
-                      updateRow(row.fsnId, { blinkitLocked: true, blinkitSp: row.blinkitSp });
+                      updateRowLocal(row.fsnId, { blinkitLocked: true });
+                      persistRowFields(row.fsnId, row.weightUnit, { blinkitSp: row.blinkitSp });
                     }
                   }}
                 />
@@ -1591,16 +1611,21 @@ function ScrollTable({
                   onChange={(v) => {
                     const next: Partial<SkuRow> = { quotedPp: v, quotedTouched: true };
                     setPartialIfNegotiatedFollows(next, row, v);
-                    updateRow(row.fsnId, next);
+                    updateRowLocal(row.fsnId, next);
                   }}
+                  onUnlock={() => updateRowLocal(row.fsnId, { quotedLocked: false })}
                   onToggleLock={() => {
                     if (!row.quotedLocked) {
-                      updateRow(row.fsnId, {
+                      updateRowLocal(row.fsnId, {
                         quotedLocked: true,
                         negotiatedPp: row.quotedPp,
                       });
+                      persistRowFields(row.fsnId, row.weightUnit, {
+                        quotedPp: row.quotedPp,
+                        negotiatedPp: row.quotedPp,
+                      });
                     } else {
-                      updateRow(row.fsnId, { quotedLocked: false });
+                      updateRowLocal(row.fsnId, { quotedLocked: false });
                     }
                   }}
                 />
@@ -1612,15 +1637,17 @@ function ScrollTable({
                   locked={row.negotiatedLocked}
                   disabled={submitted}
                   highlight={row.suggestedPp !== null && !row.negotiatedLocked}
-                  onChange={(v) => updateRow(row.fsnId, { negotiatedPp: v, negotiatedTouched: true })}
+                  onChange={(v) => updateRowLocal(row.fsnId, { negotiatedPp: v, negotiatedTouched: true })}
+                  onUnlock={() => updateRowLocal(row.fsnId, { negotiatedLocked: false })}
                   onToggleLock={() => {
                     if (!row.negotiatedLocked) {
-                      updateRow(row.fsnId, {
+                      updateRowLocal(row.fsnId, {
                         negotiatedLocked: true,
                         lastLockedNegotiated: row.negotiatedPp,
                       });
+                      persistRowFields(row.fsnId, row.weightUnit, { negotiatedPp: row.negotiatedPp });
                     } else {
-                      updateRow(row.fsnId, { negotiatedLocked: false });
+                      updateRowLocal(row.fsnId, { negotiatedLocked: false });
                     }
                   }}
                 />
@@ -1665,14 +1692,29 @@ function setPartialIfNegotiatedFollows(_patch: Partial<SkuRow>, _row: SkuRow, _v
   // placeholder: negotiated only syncs on lock per spec
 }
 
+function unlockOnEdit(
+  locked: boolean,
+  disabled: boolean | undefined,
+  onUnlock: () => void,
+) {
+  return (e: ReactMouseEvent<HTMLInputElement>) => {
+    if (locked && !disabled) {
+      e.preventDefault();
+      onUnlock();
+      queueMicrotask(() => e.currentTarget.focus());
+    }
+  };
+}
+
 function LockedPriceInput({
-  value, locked, disabled, highlight, onChange, onToggleLock,
+  value, locked, disabled, highlight, onChange, onUnlock, onToggleLock,
 }: {
   value: number;
   locked: boolean;
   disabled?: boolean;
   highlight?: boolean;
   onChange: (v: number) => void;
+  onUnlock: () => void;
   onToggleLock: () => void;
 }) {
   const lockBlocked = !locked && value < 1;
@@ -1681,16 +1723,19 @@ function LockedPriceInput({
       <input
         type="number"
         value={Number.isFinite(value) ? value : 0}
-        disabled={locked || disabled}
+        readOnly={locked}
+        disabled={disabled}
+        onMouseDown={unlockOnEdit(locked, disabled, onUnlock)}
         onChange={(e) => {
+          if (locked) return;
           const raw = e.target.value;
           if (raw === "") { onChange(0); return; }
           const v = parseFloat(raw);
           if (Number.isFinite(v) && v >= 0) onChange(v);
         }}
         className={`h-7 w-20 rounded-sm border px-1 text-right text-[12px] tabular-nums outline-none focus:border-primary disabled:bg-muted disabled:text-muted-foreground ${
-          highlight ? "border-suggest bg-suggest-bg/40" : "border-input bg-card"
-        }`}
+          locked ? "cursor-pointer bg-muted/50 text-muted-foreground" : ""
+        } ${highlight ? "border-suggest bg-suggest-bg/40" : "border-input bg-card"}`}
       />
       <button
         onClick={onToggleLock}
@@ -1707,13 +1752,14 @@ function LockedPriceInput({
 }
 
 function NullableLockedInput({
-  value, locked, disabled, warn, onChange, onToggleLock,
+  value, locked, disabled, warn, onChange, onUnlock, onToggleLock,
 }: {
   value: number | null;
   locked: boolean;
   disabled?: boolean;
   warn?: boolean;
   onChange: (v: number | null) => void;
+  onUnlock: () => void;
   onToggleLock: () => void;
 }) {
   const lockBlocked = !locked && value !== null && value < 1;
@@ -1723,16 +1769,19 @@ function NullableLockedInput({
         type="number"
         value={value === null ? "" : value}
         placeholder="NA"
-        disabled={locked || disabled}
+        readOnly={locked}
+        disabled={disabled}
+        onMouseDown={unlockOnEdit(locked, disabled, onUnlock)}
         onChange={(e) => {
+          if (locked) return;
           const raw = e.target.value;
           if (raw === "") { onChange(null); return; }
           const v = parseFloat(raw);
           if (Number.isFinite(v) && v >= 0) onChange(v);
         }}
         className={`h-7 w-20 rounded-sm border px-1 text-right text-[12px] tabular-nums outline-none focus:border-primary disabled:bg-muted disabled:text-muted-foreground ${
-          warn && value === null ? "border-warn bg-warn-bg/40" : "border-input bg-card"
-        }`}
+          locked ? "cursor-pointer bg-muted/50 text-muted-foreground" : ""
+        } ${warn && value === null ? "border-warn bg-warn-bg/40" : "border-input bg-card"}`}
       />
       <button
         onClick={onToggleLock}
@@ -1751,12 +1800,13 @@ function NullableLockedInput({
 
 // Signed adjusted GRN input — default 0, allows negative/positive numbers. Requires lock to save.
 function AdjustedGrnInput({
-  value, locked, disabled, onChange, onToggleLock,
+  value, locked, disabled, onChange, onUnlock, onToggleLock,
 }: {
   value: number;
   locked: boolean;
   disabled?: boolean;
   onChange: (v: number) => void;
+  onUnlock: () => void;
   onToggleLock: () => void;
 }) {
   const nonZero = value !== 0;
@@ -1765,16 +1815,19 @@ function AdjustedGrnInput({
       <input
         type="number"
         value={Number.isFinite(value) ? value : 0}
-        disabled={locked || disabled}
+        readOnly={locked}
+        disabled={disabled}
+        onMouseDown={unlockOnEdit(locked, disabled, onUnlock)}
         onChange={(e) => {
+          if (locked) return;
           const raw = e.target.value;
           if (raw === "" || raw === "-") { onChange(0); return; }
           const v = parseFloat(raw);
           if (Number.isFinite(v)) onChange(v);
         }}
         className={`h-7 w-20 rounded-sm border px-1 text-right text-[12px] tabular-nums outline-none focus:border-primary disabled:bg-muted disabled:text-muted-foreground ${
-          nonZero ? "border-primary/50 bg-accent/30 font-semibold" : "border-input bg-card"
-        }`}
+          locked ? "cursor-pointer bg-muted/50 text-muted-foreground" : ""
+        } ${nonZero ? "border-primary/50 bg-accent/30 font-semibold" : "border-input bg-card"}`}
       />
       <button
         onClick={onToggleLock}
