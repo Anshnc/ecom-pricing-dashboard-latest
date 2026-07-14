@@ -18,8 +18,6 @@ import {
   ArrowDown,
   X,
   Search,
-  Bell,
-  HelpCircle,
   LayoutDashboard,
   Tags,
   TrendingUp,
@@ -29,7 +27,61 @@ import {
   Calendar,
   Filter,
   Check,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
+
+const TABLE_ZOOM_MIN = 50;
+const TABLE_ZOOM_MAX = 100;
+
+function TableZoomControl({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const clamp = (n: number) =>
+    Math.min(TABLE_ZOOM_MAX, Math.max(TABLE_ZOOM_MIN, Math.round(n)));
+
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      onChange(clamp(value + (e.deltaY < 0 ? 1 : -1)));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [value, onChange]);
+
+  return (
+    <div
+      ref={rootRef}
+      className="flex items-center gap-2"
+      title="Drag slider or scroll to adjust zoom"
+    >
+      <span className="shrink-0 text-[11px] text-muted-foreground">Zoom</span>
+      <input
+        type="range"
+        min={TABLE_ZOOM_MIN}
+        max={TABLE_ZOOM_MAX}
+        step={1}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="h-1 w-24 cursor-pointer accent-primary"
+        aria-label="Table zoom"
+        aria-valuemin={TABLE_ZOOM_MIN}
+        aria-valuemax={TABLE_ZOOM_MAX}
+        aria-valuenow={value}
+      />
+      <span className="min-w-[2.25rem] text-right text-[11px] tabular-nums text-muted-foreground">
+        {value}%
+      </span>
+    </div>
+  );
+}
 
 // ---------- Types ----------
 type SkuRow = {
@@ -336,6 +388,21 @@ export function PricingDashboard() {
   const [search, setSearch] = useState("");
   const [violationFilters, setViolationFilters] = useState<Set<string>>(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
+  const [sheetFullscreen, setSheetFullscreen] = useState(false);
+  const [tableZoom, setTableZoom] = useState(TABLE_ZOOM_MAX);
+
+  useEffect(() => {
+    if (!sheetFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSheetFullscreen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = "";
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [sheetFullscreen]);
 
 
   useEffect(() => {
@@ -410,15 +477,6 @@ export function PricingDashboard() {
   }, [filtered, sortKey, sortDir]);
 
   const averages = useMemo(() => computePriceUploadAverages(enriched), [enriched]);
-
-  // Pagination (applied on top of filtered+sorted; averages use full enriched set).
-  const [pageSize, setPageSize] = useState<number>(25);
-  const [page, setPage] = useState<number>(1);
-  useEffect(() => { setPage(1); }, [search, violationFilters, pageSize, city, deliveryDate]);
-  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
-  const pageStart = (page - 1) * pageSize;
-  const pageRows = useMemo(() => sorted.slice(pageStart, pageStart + pageSize), [sorted, pageStart, pageSize]);
-
 
   const toggleSort = (key: string) => {
     if (sortKey !== key) { setSortKey(key); setSortDir("asc"); return; }
@@ -680,8 +738,23 @@ export function PricingDashboard() {
             <span>Price Upload</span>
           </div>
           <div className="flex items-center gap-3">
-            <button className="grid h-7 w-7 place-items-center rounded-md hover:bg-muted"><Bell className="h-4 w-4 text-muted-foreground" /></button>
-            <button className="grid h-7 w-7 place-items-center rounded-md hover:bg-muted"><HelpCircle className="h-4 w-4 text-muted-foreground" /></button>
+            {tab === 0 && sheetCreated && (
+              <>
+                <TableZoomControl value={tableZoom} onChange={setTableZoom} />
+                <button
+                  type="button"
+                  onClick={() => setSheetFullscreen((f) => !f)}
+                  className="grid h-7 w-7 place-items-center rounded-md hover:bg-muted"
+                  title={sheetFullscreen ? "Exit full screen (Esc)" : "Full screen pricing sheet"}
+                >
+                  {sheetFullscreen ? (
+                    <Minimize2 className="h-4 w-4 text-muted-foreground" />
+                  ) : (
+                    <Maximize2 className="h-4 w-4 text-muted-foreground" />
+                  )}
+                </button>
+              </>
+            )}
             <div className="grid h-7 w-7 place-items-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">PR</div>
           </div>
         </header>
@@ -810,8 +883,32 @@ export function PricingDashboard() {
             </div>
           </div>
 
+          <div
+            className={
+              sheetFullscreen
+                ? "fixed inset-0 z-50 flex min-h-0 flex-col bg-background p-4"
+                : ""
+            }
+          >
+          {sheetFullscreen && (
+            <div className="mb-2 flex shrink-0 items-center justify-between border-b pb-2">
+              <span className="text-sm font-semibold">Price Upload — {city} · {deliveryDate}</span>
+              <div className="flex items-center gap-3">
+                <TableZoomControl value={tableZoom} onChange={setTableZoom} />
+                <button
+                  type="button"
+                  onClick={() => setSheetFullscreen(false)}
+                  className="grid h-7 w-7 place-items-center rounded-md hover:bg-muted"
+                  title="Exit full screen (Esc)"
+                >
+                  <Minimize2 className="h-4 w-4 text-muted-foreground" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Search + violation filter */}
-          <div className="mb-2 flex flex-wrap items-center gap-2">
+          <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
             <div className="relative">
               <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <input
@@ -834,7 +931,7 @@ export function PricingDashboard() {
                 <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
               </button>
               {filterOpen && (
-                <div className="absolute left-0 top-9 z-30 w-64 rounded-md border bg-card p-2 shadow-lg">
+                <div className={`absolute left-0 top-9 w-64 rounded-md border bg-card p-2 shadow-lg ${sheetFullscreen ? "z-[60]" : "z-30"}`}>
                   <div className="mb-1 flex items-center justify-between px-1">
                     <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Rule Violations</span>
                     <div className="flex items-center gap-2">
@@ -876,33 +973,23 @@ export function PricingDashboard() {
                 Clear filters
               </button>
             )}
-            <div className="ml-auto flex items-center gap-3">
-              <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                Rows/page
-                <select
-                  value={pageSize}
-                  onChange={(e) => setPageSize(Number(e.target.value))}
-                  className="h-7 rounded-md border border-input bg-card px-1 text-[11px]"
-                >
-                  {[25, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
-              </label>
-              <span className="text-[11px] text-muted-foreground">
-                Showing {sorted.length === 0 ? 0 : pageStart + 1}–{Math.min(pageStart + pageSize, sorted.length)} of {sorted.length} (total {rows.length})
-              </span>
-            </div>
+            <span className="ml-auto text-[11px] text-muted-foreground">
+              {sorted.length} of {rows.length} SKUs
+            </span>
           </div>
 
           {/* Table */}
-          <div className="rounded-md border bg-card">
-            <div className="max-h-[calc(100vh-14rem)] overflow-auto">
-            <div className="flex w-max min-w-full">
+          <div className={`rounded-md border bg-card ${sheetFullscreen ? "flex min-h-0 flex-1 flex-col" : ""}`}>
+            <div
+              className={`overflow-auto ${sheetFullscreen ? "min-h-0 flex-1" : "max-h-[calc(100vh-14rem)]"}`}
+            >
+            <div className="flex w-max min-w-full" style={{ zoom: tableZoom / 100 }}>
               {/* Frozen — immovable on horizontal scroll */}
               <div className="sticky left-0 z-30 w-auto shrink-0 border-r-2 border-border bg-card">
 
 
                 <FrozenTable
-                  rows={pageRows}
+                  rows={sorted}
                   sortKey={sortKey}
                   sortDir={sortDir}
                   toggleSort={toggleSort}
@@ -912,7 +999,7 @@ export function PricingDashboard() {
               {/* Scrollable */}
               <div className="min-w-0 flex-1">
                 <ScrollTable
-                  rows={pageRows}
+                  rows={sorted}
                   sortKey={sortKey}
                   sortDir={sortDir}
                   toggleSort={toggleSort}
@@ -925,26 +1012,9 @@ export function PricingDashboard() {
             </div>
           </div>
 
-          {/* Pagination controls */}
-          <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
-            <span>Total demand {totalDemand.toLocaleString()} units</span>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
-                className="h-7 rounded-md border border-input bg-card px-2 text-[11px] disabled:opacity-40 hover:bg-muted"
-              >
-                Prev
-              </button>
-              <span>Page {page} of {pageCount}</span>
-              <button
-                onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
-                disabled={page >= pageCount}
-                className="h-7 rounded-md border border-input bg-card px-2 text-[11px] disabled:opacity-40 hover:bg-muted"
-              >
-                Next
-              </button>
-            </div>
+          <div className={`text-[11px] text-muted-foreground ${sheetFullscreen ? "mt-2 shrink-0" : "mt-2"}`}>
+            Total demand {totalDemand.toLocaleString()} units
+          </div>
           </div>
           </>)}
             </>
@@ -1277,23 +1347,36 @@ function FrozenTable({
   rows, sortKey, sortDir, toggleSort, averages,
 }: {
   rows: Enriched[]; sortKey: string | null; sortDir: SortDir; toggleSort: (k: string) => void;
-  averages: { demandUnits: number | null; totalDemandPct: number | null; nlcValueMix: number | null };
+  averages: ReturnType<typeof computePriceUploadAverages>;
 }) {
   return (
     <table className="w-auto border-collapse text-[12px] [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
-
-
+      <colgroup>
+        <col style={{ width: 110 }} /><col style={{ width: 130 }} /><col style={{ width: 200 }} />
+        <col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} />
+        <col style={{ width: 110 }} /><col style={{ width: 110 }} />
+      </colgroup>
       <thead>
         <tr>
           <th colSpan={3} className={`${STICKY_FROZEN_GROUP} h-6 border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information</th>
+          <th colSpan={3} className={`${STICKY_FROZEN_GROUP} h-6 border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information (cont.)</th>
+          <th colSpan={2} className={`${STICKY_FROZEN_GROUP} h-6 border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
         </tr>
         <tr className={`${COL_HEAD_H} border-b`}>
           <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>FSN ID</th>
           <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Weight Unit</th>
           <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>NC SKU Name</th>
+          <th className={`${STICKY_FROZEN_COL} border-l bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Special Tags</th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Subcategory</th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-right align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Conv. Factor</th>
+          <th className={`${STICKY_FROZEN_COL} border-l bg-card px-2 align-middle`}><SortHeader align="right" label="Demand Units" active={sortKey==="demandUnits"} dir={sortDir} onClick={() => toggleSort("demandUnits")} /></th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Total Demand %" active={sortKey==="totalDemandPct"} dir={sortDir} onClick={() => toggleSort("totalDemandPct")} /></th>
         </tr>
         <tr className={`${SUB_HEAD_H} border-b text-[11px] font-medium`}>
           <td colSpan={3} className={`${STICKY_FROZEN_AVG} bg-accent px-2 text-muted-foreground`}>Averages →</td>
+          <td colSpan={3} className={`${STICKY_FROZEN_AVG} border-l bg-accent px-2 text-muted-foreground`}>Averages →</td>
+          <td className={`${STICKY_FROZEN_AVG} border-l bg-accent px-2 text-right tabular-nums`}>{averages.demandUnits !== null ? Math.round(averages.demandUnits).toLocaleString() : "—"}</td>
+          <td className={`${STICKY_FROZEN_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.totalDemandPct !== null ? `${averages.totalDemandPct.toFixed(3)}%` : "—"}</td>
         </tr>
       </thead>
       <tbody>
@@ -1311,8 +1394,18 @@ function FrozenTable({
               <td className="whitespace-nowrap px-2 font-mono text-[11px] text-muted-foreground">{row.fsnId}</td>
               <td className="whitespace-nowrap px-2 text-muted-foreground">{row.weightUnit}</td>
               <td className="max-w-[200px] truncate px-2 text-[11px]">{row.ncSkuName || "—"}</td>
-
-
+              <td className="border-l px-2">
+                {row.specialTag && (
+                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                    row.specialTag === "Summer" ? "bg-warn-bg text-warn-foreground" :
+                    row.specialTag === "Seasonal" ? "bg-accent text-accent-foreground" : "bg-muted text-foreground"
+                  }`}>{row.specialTag}</span>
+                )}
+              </td>
+              <td className="px-2 text-muted-foreground">{row.subcategory}</td>
+              <td className="px-2 text-right tabular-nums">{row.conversionFactor.toFixed(2)}</td>
+              <td className="border-l px-2 text-right tabular-nums">{row.demandUnits.toLocaleString()}</td>
+              <td className="px-2 text-right tabular-nums">{calc.totalDemandPct.toFixed(3)}%</td>
             </tr>
           );
         })}
@@ -1334,30 +1427,21 @@ function ScrollTable({
   submitted: boolean;
 }) {
   return (
-    <table className="min-w-[2400px] border-collapse text-[12px] [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
+    <table className="min-w-[1850px] border-collapse text-[12px] [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
       <colgroup>
-        {/* Basic Info cont. (3): Special Tags, Subcategory, Conv Factor */}
-        <col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} />
-        {/* Demand Info (8): Demand Units, Total Demand %, NLC Value Mix, GRN/kg, Prev GRN/unit, GRN/unit, GRN Diff, Adjusted GRN */}
-        <col style={{ width: 110 }} /><col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 130 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 120 }} />
+        {/* Demand Info (6): NLC Value Mix, GRN/kg, Prev GRN/unit, GRN/unit, GRN Diff, Adjusted GRN */}
+        <col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 130 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 120 }} />
         {/* Benchmark Info (12) */}
         <col style={{ width: 90 }} /><col style={{ width: 80 }} /><col style={{ width: 120 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} />
       </colgroup>
       <thead>
         <tr className="h-6">
-          <th colSpan={3} className={`${STICKY_GROUP} h-6 border-b bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information (cont.)</th>
-          <th colSpan={8} className={`${STICKY_GROUP} h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
+          <th colSpan={6} className={`${STICKY_GROUP} h-6 border-b bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
           <th colSpan={12} className={`${STICKY_GROUP} h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Benchmark Information</th>
         </tr>
 
         <tr className={`${COL_HEAD_H} border-b`}>
-          {/* Basic Info cont. */}
-          <th className={`${STICKY_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Special Tags</th>
-          <th className={`${STICKY_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Subcategory</th>
-          <th className={`${STICKY_COL} bg-card px-2 text-right align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Conv. Factor</th>
           {/* Demand Info */}
-          <th className={`${STICKY_COL} border-l bg-card px-2 align-middle`}><SortHeader align="right" label="Demand Units" active={sortKey==="demandUnits"} dir={sortDir} onClick={() => toggleSort("demandUnits")} /></th>
-          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Total Demand %" active={sortKey==="totalDemandPct"} dir={sortDir} onClick={() => toggleSort("totalDemandPct")} /></th>
           <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="NLC Value Mix" active={sortKey==="nlcValueMix"} dir={sortDir} onClick={() => toggleSort("nlcValueMix")} /></th>
           <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="GRN ₹/kg" active={sortKey==="grnPricePerKg"} dir={sortDir} onClick={() => toggleSort("grnPricePerKg")} /></th>
           <th className={`${STICKY_COL} bg-card px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}><Tip text="GRN ₹/unit on day T-n-1 (previous day). Read-only.">Prev Day GRN ₹/unit</Tip></th>
@@ -1380,10 +1464,6 @@ function ScrollTable({
         </tr>
         {/* Averages */}
         <tr className={`${SUB_HEAD_H} border-b text-[11px] font-medium`}>
-          <td className={`${STICKY_AVG} bg-accent px-2 text-muted-foreground`} colSpan={3}>Averages →</td>
-          {/* Demand */}
-          <td className={`${STICKY_AVG} border-l bg-accent px-2 text-right tabular-nums`}>{averages.demandUnits !== null ? Math.round(averages.demandUnits).toLocaleString() : "—"}</td>
-          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.totalDemandPct !== null ? `${averages.totalDemandPct.toFixed(3)}%` : "—"}</td>
           <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.nlcValueMix !== null ? `₹${Math.round(averages.nlcValueMix).toLocaleString()}` : "—"}</td>
           <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.grnPricePerKg)}</td>
           <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.prevDayGrnPerUnit)}</td>
@@ -1414,21 +1494,7 @@ function ScrollTable({
             (!row.negotiatedLocked || row.negotiatedPp === row.lastLockedNegotiated);
           return (
             <tr key={row.fsnId} className={`${ROW_H} border-b last:border-b-0 hover:bg-muted/40`}>
-              {/* Basic Info cont. */}
-              <td className="px-2">
-                {row.specialTag && (
-                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                    row.specialTag === "Summer" ? "bg-warn-bg text-warn-foreground" :
-                    row.specialTag === "Seasonal" ? "bg-accent text-accent-foreground" : "bg-muted text-foreground"
-                  }`}>{row.specialTag}</span>
-                )}
-              </td>
-              <td className="px-2 text-muted-foreground">{row.subcategory}</td>
-              <td className="px-2 text-right tabular-nums">{row.conversionFactor.toFixed(2)}</td>
-
               {/* Demand Info */}
-              <td className="border-l px-2 text-right tabular-nums">{row.demandUnits.toLocaleString()}</td>
-              <td className="px-2 text-right tabular-nums">{calc.totalDemandPct.toFixed(3)}%</td>
               <td className="px-2 text-right tabular-nums">₹{Math.round(calc.nlcValueMix).toLocaleString()}</td>
 
               {/* GRN ₹/kg — locked by default; unlock to edit, lock to save */}
