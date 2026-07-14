@@ -156,11 +156,11 @@ function deriveRow(r: SkuRow, totalDemand: number) {
     effectiveGrnPerUnit !== null && r.prevDayGrnPerUnit !== null && r.prevDayGrnPerUnit !== undefined
       ? effectiveGrnPerUnit - r.prevDayGrnPerUnit
       : null;
-  const nlc = r.quotedPp + r.packagingCost + r.fmlCost + r.processingCost;
+  const nlc = r.negotiatedPp + r.packagingCost + r.fmlCost + r.processingCost;
   const piPct = r.blinkitSp ? ((r.blinkitSp - nlc) / r.blinkitSp) * 100 : null;
   const gm = grnPerUnit !== null ? nlc - grnPerUnit : null;
   const totalDemandPct = totalDemand ? (r.demandUnits / totalDemand) * 100 : 0;
-  const impactPpDiff = grnPerUnit !== null ? (r.quotedPp - grnPerUnit) * (totalDemandPct / 100) : null;
+  const impactPpDiff = grnPerUnit !== null ? (r.negotiatedPp - grnPerUnit) * (totalDemandPct / 100) : null;
   const impactGm = gm !== null ? gm * (totalDemandPct / 100) : null;
   const valueMix = r.blinkitSp !== null ? r.blinkitSp * r.demandUnits : null;
   const nlcValueMix = nlc * r.demandUnits;
@@ -220,12 +220,12 @@ function computePriceUploadAverages(enriched: Enriched[]) {
     impactGm: plainSum(enriched, (e) => e.calc.impactGm),
     valueMix: weightedByDemandPct(enriched, (e) => e.calc.valueMix),
     gm: wNlc !== null && wGrnPerUnit !== null ? wNlc - wGrnPerUnit : null,
-    nlcValueMix: null as number | null,
-    grnDiff: null as number | null,
-    adjustedGrn: null as number | null,
-    quotedPp: null as number | null,
-    negotiatedPp: null as number | null,
-    suggestedPp: null as number | null,
+    nlcValueMix: plainSum(enriched, (e) => e.calc.nlcValueMix),
+    grnDiff: weightedByDemandPct(enriched, (e) => e.calc.grnDiff),
+    adjustedGrn: weightedByDemandPct(enriched, (e) => e.row.adjustedGrn ?? 0),
+    quotedPp: weightedByDemandPct(enriched, (e) => e.row.quotedPp),
+    negotiatedPp: weightedByDemandPct(enriched, (e) => e.row.negotiatedPp),
+    suggestedPp: weightedByDemandPct(enriched, (e) => e.row.suggestedPp),
   };
 }
 
