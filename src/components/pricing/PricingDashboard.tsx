@@ -1,6 +1,7 @@
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useMemo, useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
 import { usePricingSheet } from "@/hooks/usePricingSheet";
+import { useSubcategories } from "@/hooks/useSubcategories";
 import { useGuardrails } from "@/hooks/useGuardrails";
 import { parseCSV, toNum, toInt } from "@/lib/csv";
 import {
@@ -18,8 +19,6 @@ import {
   ArrowDown,
   X,
   Search,
-  Bell,
-  HelpCircle,
   LayoutDashboard,
   Tags,
   TrendingUp,
@@ -28,8 +27,63 @@ import {
   FileSpreadsheet,
   Calendar,
   Filter,
+  Layers,
   Check,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
+
+const TABLE_ZOOM_MIN = 50;
+const TABLE_ZOOM_MAX = 100;
+
+function TableZoomControl({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const clamp = (n: number) =>
+    Math.min(TABLE_ZOOM_MAX, Math.max(TABLE_ZOOM_MIN, Math.round(n)));
+
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      onChange(clamp(value + (e.deltaY < 0 ? 1 : -1)));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [value, onChange]);
+
+  return (
+    <div
+      ref={rootRef}
+      className="flex items-center gap-2"
+      title="Drag slider or scroll to adjust zoom"
+    >
+      <span className="shrink-0 text-[11px] text-muted-foreground">Zoom</span>
+      <input
+        type="range"
+        min={TABLE_ZOOM_MIN}
+        max={TABLE_ZOOM_MAX}
+        step={1}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="h-1 w-24 cursor-pointer accent-primary"
+        aria-label="Table zoom"
+        aria-valuemin={TABLE_ZOOM_MIN}
+        aria-valuemax={TABLE_ZOOM_MAX}
+        aria-valuenow={value}
+      />
+      <span className="min-w-[2.25rem] text-right text-[11px] tabular-nums text-muted-foreground">
+        {value}%
+      </span>
+    </div>
+  );
+}
 
 // ---------- Types ----------
 type SkuRow = {
@@ -45,6 +99,7 @@ type SkuRow = {
   demandUnits: number;
   piMixPct: number;
   grnPricePerKg: number | null;
+  prevDayGrnPerKg?: number | null;
   prevDayGrnPerUnit?: number | null;
   grnLocked?: boolean;
   grnWarning?: boolean;
@@ -120,6 +175,7 @@ function dbToSku(r: PricingSheetRow): SkuRow {
     demandUnits: r.demand_units ?? 0,
     piMixPct: r.demand_pct ?? 0,
     grnPricePerKg: r.grn_price_per_kg,
+    prevDayGrnPerKg: r.prev_grn_price_per_kg,
     prevDayGrnPerUnit: r.prev_grn_price_per_unit,
     grnLocked: true,
     grnWarning: r.grn_price_per_kg === null,
@@ -154,15 +210,77 @@ function deriveRow(r: SkuRow, totalDemand: number) {
     effectiveGrnPerUnit !== null && r.prevDayGrnPerUnit !== null && r.prevDayGrnPerUnit !== undefined
       ? effectiveGrnPerUnit - r.prevDayGrnPerUnit
       : null;
-  const nlc = r.quotedPp + r.packagingCost + r.fmlCost + r.processingCost;
+  const nlc = r.negotiatedPp + r.packagingCost + r.fmlCost + r.processingCost;
   const piPct = r.blinkitSp ? ((r.blinkitSp - nlc) / r.blinkitSp) * 100 : null;
   const gm = grnPerUnit !== null ? nlc - grnPerUnit : null;
   const totalDemandPct = totalDemand ? (r.demandUnits / totalDemand) * 100 : 0;
-  const impactPpDiff = grnPerUnit !== null ? (r.quotedPp - grnPerUnit) * (totalDemandPct / 100) : null;
+  const impactPpDiff = grnPerUnit !== null ? (r.negotiatedPp - grnPerUnit) * (totalDemandPct / 100) : null;
   const impactGm = gm !== null ? gm * (totalDemandPct / 100) : null;
   const valueMix = r.blinkitSp !== null ? r.blinkitSp * r.demandUnits : null;
   const nlcValueMix = nlc * r.demandUnits;
   return { grnPerUnit, prevDayGrnPerUnit: r.prevDayGrnPerUnit ?? null, grnDiff, nlc, piPct, gm, totalDemandPct, impactPpDiff, impactGm, valueMix, nlcValueMix };
+}
+
+type Enriched = { row: SkuRow; calc: ReturnType<typeof deriveRow> };
+
+function plainSum(
+  enriched: Enriched[],
+  getValue: (e: Enriched) => number | null | undefined,
+): number | null {
+  let sum = 0;
+  let has = false;
+  for (const e of enriched) {
+    const v = getValue(e);
+    if (v === null || v === undefined) continue;
+    sum += v;
+    has = true;
+  }
+  return has ? sum : null;
+}
+
+function weightedByDemandPct(
+  enriched: Enriched[],
+  getValue: (e: Enriched) => number | null | undefined,
+): number | null {
+  let weightedSum = 0;
+  let weightSum = 0;
+  for (const e of enriched) {
+    const v = getValue(e);
+    if (v === null || v === undefined) continue;
+    const w = e.calc.totalDemandPct;
+    weightedSum += v * w;
+    weightSum += w;
+  }
+  return weightSum > 0 ? weightedSum / weightSum : null;
+}
+
+/** Price Upload Averages — always computed over the full basket (all SKUs), never filtered rows. */
+function computePriceUploadAverages(enriched: Enriched[]) {
+  const wNlc = weightedByDemandPct(enriched, (e) => e.calc.nlc);
+  const wGrnPerUnit = weightedByDemandPct(enriched, (e) => e.calc.grnPerUnit);
+
+  return {
+    demandUnits: plainSum(enriched, (e) => e.row.demandUnits),
+    totalDemandPct: plainSum(enriched, (e) => e.calc.totalDemandPct),
+    grnPricePerKg: weightedByDemandPct(enriched, (e) => e.row.grnPricePerKg),
+    grnPerUnit: wGrnPerUnit,
+    prevDayGrnPerKg: weightedByDemandPct(enriched, (e) => e.row.prevDayGrnPerKg ?? null),
+    prevDayGrnPerUnit: weightedByDemandPct(enriched, (e) => e.calc.prevDayGrnPerUnit),
+    blinkitSp: weightedByDemandPct(enriched, (e) => e.row.blinkitSp),
+    nlc: wNlc,
+    piPct: weightedByDemandPct(enriched, (e) => e.calc.piPct),
+    priceDeflectionPct: weightedByDemandPct(enriched, (e) => e.row.priceDeflectionPct),
+    impactPpDiff: plainSum(enriched, (e) => e.calc.impactPpDiff),
+    impactGm: plainSum(enriched, (e) => e.calc.impactGm),
+    valueMix: weightedByDemandPct(enriched, (e) => e.calc.valueMix),
+    gm: wNlc !== null && wGrnPerUnit !== null ? wNlc - wGrnPerUnit : null,
+    nlcValueMix: plainSum(enriched, (e) => e.calc.nlcValueMix),
+    grnDiff: weightedByDemandPct(enriched, (e) => e.calc.grnDiff),
+    adjustedGrn: weightedByDemandPct(enriched, (e) => e.row.adjustedGrn ?? 0),
+    quotedPp: weightedByDemandPct(enriched, (e) => e.row.quotedPp),
+    negotiatedPp: weightedByDemandPct(enriched, (e) => e.row.negotiatedPp),
+    suggestedPp: weightedByDemandPct(enriched, (e) => e.row.suggestedPp),
+  };
 }
 
 // ---------- Tooltip ----------
@@ -214,6 +332,16 @@ export function PricingDashboard() {
   // Live-load pricing_sheet rows for the selected city + delivery date.
   const { rows: dbRows, updateRow: dbUpdateRow, submitSheet: dbSubmit, refetch: dbRefetch } =
     usePricingSheet({ city, deliveryDate });
+  const { subcategoryNames, resolveSubcategory } = useSubcategories();
+
+  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const SAVE_MAP: Record<string, keyof PricingSheetRow> = {
+    blinkitSp: "blinkit_sp",
+    quotedPp: "quoted_pp",
+    negotiatedPp: "negotiated_pp",
+    adjustedGrn: "adjusted_grn",
+    grnPricePerKg: "grn_price_per_kg",
+  };
 
   useEffect(() => {
     // Merge DB rows into local rows so client-only fields (touched, acks) and
@@ -227,28 +355,31 @@ export function PricingDashboard() {
         if (!p) return fresh;
         const pendingKey = fresh.fsnId;
         const hasPending = !!saveTimers.current[pendingKey];
-        // Preserve client-only bookkeeping always.
+        const editing =
+          !p.grnLocked ||
+          !p.blinkitLocked ||
+          !p.adjustedGrnLocked ||
+          !p.quotedLocked ||
+          !p.negotiatedLocked;
         const merged: SkuRow = {
           ...fresh,
+          grnLocked: p.grnLocked,
+          blinkitLocked: p.blinkitLocked,
+          adjustedGrnLocked: p.adjustedGrnLocked,
+          quotedLocked: p.quotedLocked,
+          negotiatedLocked: p.negotiatedLocked,
           quotedTouched: p.quotedTouched,
           negotiatedTouched: p.negotiatedTouched,
           lastLockedNegotiated: p.lastLockedNegotiated,
           suggestionAcknowledgedAt: p.suggestionAcknowledgedAt,
           suggestedPp: p.suggestedPp,
         };
-        // If a save is in-flight for this row, keep local edited values and
-        // lock flags so the round-trip refresh doesn't reset what the user just clicked.
-        if (hasPending) {
-          merged.quotedPp = p.quotedPp;
-          merged.negotiatedPp = p.negotiatedPp;
-          merged.adjustedGrn = p.adjustedGrn;
-          merged.blinkitSp = p.blinkitSp;
-          merged.grnPricePerKg = p.grnPricePerKg;
-          merged.quotedLocked = p.quotedLocked;
-          merged.negotiatedLocked = p.negotiatedLocked;
-          merged.adjustedGrnLocked = p.adjustedGrnLocked;
-          merged.blinkitLocked = p.blinkitLocked;
-          merged.grnLocked = p.grnLocked;
+        if (editing || hasPending) {
+          if (!p.grnLocked || hasPending) merged.grnPricePerKg = p.grnPricePerKg;
+          if (!p.blinkitLocked || hasPending) merged.blinkitSp = p.blinkitSp;
+          if (!p.adjustedGrnLocked || hasPending) merged.adjustedGrn = p.adjustedGrn;
+          if (!p.quotedLocked || hasPending) merged.quotedPp = p.quotedPp;
+          if (!p.negotiatedLocked || hasPending) merged.negotiatedPp = p.negotiatedPp;
         }
         return merged;
       });
@@ -271,7 +402,24 @@ export function PricingDashboard() {
   const [showFab, setShowFab] = useState(false);
   const [search, setSearch] = useState("");
   const [violationFilters, setViolationFilters] = useState<Set<string>>(new Set());
+  const [subcategoryFilters, setSubcategoryFilters] = useState<Set<string>>(new Set());
   const [filterOpen, setFilterOpen] = useState(false);
+  const [subcatFilterOpen, setSubcatFilterOpen] = useState(false);
+  const [sheetFullscreen, setSheetFullscreen] = useState(false);
+  const [tableZoom, setTableZoom] = useState(TABLE_ZOOM_MAX);
+
+  useEffect(() => {
+    if (!sheetFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSheetFullscreen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = "";
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [sheetFullscreen]);
 
 
   useEffect(() => {
@@ -298,12 +446,17 @@ export function PricingDashboard() {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     const fs = violationFilters;
+    const subs = subcategoryFilters;
     return enriched.filter(({ row, calc }) => {
       if (q && !(
         row.fsnId.toLowerCase().includes(q) ||
         row.ncSkuId.toLowerCase().includes(q) ||
         row.ncSkuName.toLowerCase().includes(q)
       )) return false;
+      if (subs.size > 0) {
+        const sub = resolveSubcategory(row.fsnId, row.ncSkuId, row.subcategory);
+        if (!sub || !subs.has(sub)) return false;
+      }
       if (fs.size === 0) return true;
       if (fs.has("neg_pi") && calc.piPct !== null && calc.piPct < 0) return true;
       if (fs.has("neg_gm") && calc.gm !== null && calc.gm < 0) return true;
@@ -313,7 +466,7 @@ export function PricingDashboard() {
       if (fs.has("high_deflection") && row.priceDeflectionPct > 8) return true;
       return false;
     });
-  }, [enriched, search, violationFilters]);
+  }, [enriched, search, violationFilters, subcategoryFilters, resolveSubcategory]);
 
   const sorted = useMemo(() => {
     if (!sortKey || !sortDir) return filtered;
@@ -345,60 +498,27 @@ export function PricingDashboard() {
     });
   }, [filtered, sortKey, sortDir]);
 
-  const averages = useMemo(() => {
-    const valid = (arr: (number | null)[]) => arr.filter((x): x is number => x !== null);
-    const avg = (arr: number[]) => (arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null);
-    const src = sorted;
-    return {
-      demandUnits: avg(src.map((e) => e.row.demandUnits)),
-      totalDemandPct: avg(src.map((e) => e.calc.totalDemandPct)),
-      piMixPct: avg(src.map((e) => e.row.piMixPct)),
-      grnPricePerKg: avg(valid(src.map((e) => e.row.grnPricePerKg))),
-      grnPerUnit: avg(valid(src.map((e) => e.calc.grnPerUnit))),
-      prevDayGrnPerUnit: avg(valid(src.map((e) => e.calc.prevDayGrnPerUnit))),
-      grnDiff: avg(valid(src.map((e) => e.calc.grnDiff))),
-      adjustedGrn: avg(src.map((e) => e.row.adjustedGrn ?? 0)),
-      blinkitSp: avg(valid(src.map((e) => e.row.blinkitSp))),
-      quotedPp: avg(src.map((e) => e.row.quotedPp)),
-      negotiatedPp: avg(src.map((e) => e.row.negotiatedPp)),
-      suggestedPp: avg(valid(src.map((e) => e.row.suggestedPp))),
-      nlc: avg(src.map((e) => e.calc.nlc)),
-      piPct: avg(valid(src.map((e) => e.calc.piPct))),
-      gm: avg(valid(src.map((e) => e.calc.gm))),
-      priceDeflectionPct: avg(src.map((e) => e.row.priceDeflectionPct)),
-      impactPpDiff: avg(valid(src.map((e) => e.calc.impactPpDiff))),
-      impactGm: avg(valid(src.map((e) => e.calc.impactGm))),
-      valueMix: avg(valid(src.map((e) => e.calc.valueMix))),
-      nlcValueMix: avg(src.map((e) => e.calc.nlcValueMix)),
-    };
-  }, [sorted]);
+  const averages = useMemo(() => computePriceUploadAverages(enriched), [enriched]);
 
-  // Pagination (applied on top of filtered+sorted; averages stay from full set).
-  const [pageSize, setPageSize] = useState<number>(25);
-  const [page, setPage] = useState<number>(1);
-  useEffect(() => { setPage(1); }, [search, violationFilters, pageSize, city, deliveryDate]);
-  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
-  const pageStart = (page - 1) * pageSize;
-  const pageRows = useMemo(() => sorted.slice(pageStart, pageStart + pageSize), [sorted, pageStart, pageSize]);
-
+  const subcategoryOptions = useMemo(() => {
+    const fromRows = new Set<string>();
+    for (const r of rows) {
+      const sub = resolveSubcategory(r.fsnId, r.ncSkuId, r.subcategory);
+      if (sub) fromRows.add(sub);
+    }
+    return Array.from(new Set([...subcategoryNames, ...fromRows])).sort((a, b) => a.localeCompare(b));
+  }, [subcategoryNames, rows, resolveSubcategory]);
 
   const toggleSort = (key: string) => {
     if (sortKey !== key) { setSortKey(key); setSortDir("asc"); return; }
     setSortDir((d) => (d === "asc" ? "desc" : "asc"));
   };
 
-  // Debounced Supabase persistence for edited fields.
-  const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const SAVE_MAP: Record<string, keyof PricingSheetRow> = {
-    blinkitSp: "blinkit_sp",
-    quotedPp: "quoted_pp",
-    negotiatedPp: "negotiated_pp",
-    adjustedGrn: "adjusted_grn",
-    grnPricePerKg: "grn_price_per_kg",
-  };
-  const updateRow = (fsnId: string, patch: Partial<SkuRow>) => {
+  const updateRowLocal = (fsnId: string, patch: Partial<SkuRow>) => {
     setRows((rs) => rs.map((r) => (r.fsnId === fsnId ? { ...r, ...patch } : r)));
-    // Build a DB patch of only the persistable edited fields.
+  };
+
+  const persistRowFields = (fsnId: string, weightUnit: string, patch: Partial<SkuRow>) => {
     const dbPatch: Partial<PricingSheetRow> = {};
     for (const [k, col] of Object.entries(SAVE_MAP)) {
       if (k in patch) (dbPatch as Record<string, unknown>)[col] = (patch as Record<string, unknown>)[k];
@@ -407,11 +527,7 @@ export function PricingDashboard() {
     const key = fsnId;
     if (saveTimers.current[key]) clearTimeout(saveTimers.current[key]);
     saveTimers.current[key] = setTimeout(() => {
-      const row = rows.find((r) => r.fsnId === fsnId);
-      dbUpdateRow(
-        { fsn_id: fsnId, weight_unit: row?.weightUnit ?? null },
-        dbPatch,
-      )
+      dbUpdateRow({ fsn_id: fsnId, weight_unit: weightUnit }, dbPatch)
         .catch(async (e) => {
           const { toast } = await import("sonner");
           toast.error(`Save failed: ${(e as Error).message}`);
@@ -515,7 +631,12 @@ export function PricingDashboard() {
   };
 
   const anyUnlockedEdit = rows.some(
-    (r) => (r.quotedTouched && !r.quotedLocked) || (r.negotiatedTouched && !r.negotiatedLocked)
+    (r) =>
+      !(r.grnLocked ?? true) ||
+      !(r.blinkitLocked ?? true) ||
+      !(r.adjustedGrnLocked ?? true) ||
+      !r.quotedLocked ||
+      !r.negotiatedLocked
   );
   const blockedBySuggestion = rows.some(
     (r) => r.suggestedPp !== null && (!r.negotiatedLocked || r.negotiatedPp === r.lastLockedNegotiated && r.suggestionAcknowledgedAt === 0)
@@ -552,6 +673,9 @@ export function PricingDashboard() {
     setRows((rs) =>
       rs.map((r) => ({
         ...r,
+        grnLocked: true,
+        blinkitLocked: true,
+        adjustedGrnLocked: true,
         quotedLocked: true,
         negotiatedLocked: true,
         lastLockedNegotiated: r.negotiatedPp,
@@ -642,8 +766,23 @@ export function PricingDashboard() {
             <span>Price Upload</span>
           </div>
           <div className="flex items-center gap-3">
-            <button className="grid h-7 w-7 place-items-center rounded-md hover:bg-muted"><Bell className="h-4 w-4 text-muted-foreground" /></button>
-            <button className="grid h-7 w-7 place-items-center rounded-md hover:bg-muted"><HelpCircle className="h-4 w-4 text-muted-foreground" /></button>
+            {tab === 0 && sheetCreated && (
+              <>
+                <TableZoomControl value={tableZoom} onChange={setTableZoom} />
+                <button
+                  type="button"
+                  onClick={() => setSheetFullscreen((f) => !f)}
+                  className="grid h-7 w-7 place-items-center rounded-md hover:bg-muted"
+                  title={sheetFullscreen ? "Exit full screen (Esc)" : "Full screen pricing sheet"}
+                >
+                  {sheetFullscreen ? (
+                    <Minimize2 className="h-4 w-4 text-muted-foreground" />
+                  ) : (
+                    <Maximize2 className="h-4 w-4 text-muted-foreground" />
+                  )}
+                </button>
+              </>
+            )}
             <div className="grid h-7 w-7 place-items-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">PR</div>
           </div>
         </header>
@@ -718,7 +857,7 @@ export function PricingDashboard() {
                   };
                   const body = sorted.map(({ row, calc }) =>
                     [row.fsnId, row.weightUnit, row.ncSkuId, row.ncSkuName, row.subcategory, row.conversionFactor,
-                     row.demandUnits, calc.totalDemandPct?.toFixed(2), row.grnPricePerKg ?? "",
+                     row.demandUnits, calc.totalDemandPct?.toFixed(3), row.grnPricePerKg ?? "",
                      calc.grnPerUnit?.toFixed(2) ?? "", row.prevDayGrnPerUnit ?? "", calc.grnDiff?.toFixed(2) ?? "",
                      row.blinkitSp ?? "", row.adjustedGrn ?? 0, row.quotedPp, row.negotiatedPp,
                      calc.nlc.toFixed(2), calc.piPct?.toFixed(2) ?? "", calc.gm?.toFixed(2) ?? "",
@@ -772,8 +911,32 @@ export function PricingDashboard() {
             </div>
           </div>
 
+          <div
+            className={
+              sheetFullscreen
+                ? "fixed inset-0 z-50 flex min-h-0 flex-col bg-background p-4"
+                : ""
+            }
+          >
+          {sheetFullscreen && (
+            <div className="mb-2 flex shrink-0 items-center justify-between border-b pb-2">
+              <span className="text-sm font-semibold">Price Upload — {city} · {deliveryDate}</span>
+              <div className="flex items-center gap-3">
+                <TableZoomControl value={tableZoom} onChange={setTableZoom} />
+                <button
+                  type="button"
+                  onClick={() => setSheetFullscreen(false)}
+                  className="grid h-7 w-7 place-items-center rounded-md hover:bg-muted"
+                  title="Exit full screen (Esc)"
+                >
+                  <Minimize2 className="h-4 w-4 text-muted-foreground" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Search + violation filter */}
-          <div className="mb-2 flex flex-wrap items-center gap-2">
+          <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
             <div className="relative">
               <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <input
@@ -796,7 +959,7 @@ export function PricingDashboard() {
                 <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
               </button>
               {filterOpen && (
-                <div className="absolute left-0 top-9 z-30 w-64 rounded-md border bg-card p-2 shadow-lg">
+                <div className={`absolute left-0 top-9 w-64 rounded-md border bg-card p-2 shadow-lg ${sheetFullscreen ? "z-[60]" : "z-30"}`}>
                   <div className="mb-1 flex items-center justify-between px-1">
                     <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Rule Violations</span>
                     <div className="flex items-center gap-2">
@@ -830,82 +993,108 @@ export function PricingDashboard() {
                 </div>
               )}
             </div>
-            {violationFilters.size > 0 && (
+            <div className="relative">
               <button
-                onClick={() => setViolationFilters(new Set())}
+                onClick={() => setSubcatFilterOpen((o) => !o)}
+                className="inline-flex h-8 items-center gap-2 rounded-md border border-input bg-card px-3 text-[12px] font-medium hover:bg-muted"
+              >
+                <Layers className="h-3.5 w-3.5 text-muted-foreground" />
+                <span>Subcategory</span>
+                <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  {subcategoryFilters.size === 0 ? "All" : `${subcategoryFilters.size} selected`}
+                </span>
+                <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+              </button>
+              {subcatFilterOpen && (
+                <div className={`absolute left-0 top-9 max-h-72 w-64 overflow-y-auto rounded-md border bg-card p-2 shadow-lg ${sheetFullscreen ? "z-[60]" : "z-30"}`}>
+                  <div className="mb-1 flex items-center justify-between px-1">
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Subcategory</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setSubcategoryFilters(new Set(subcategoryOptions))}
+                        className="text-[11px] text-primary hover:underline"
+                      >Select All</button>
+                      <button
+                        onClick={() => setSubcategoryFilters(new Set())}
+                        className="text-[11px] text-muted-foreground hover:underline"
+                      >Clear</button>
+                    </div>
+                  </div>
+                  <div className="flex flex-col">
+                    {subcategoryOptions.length === 0 ? (
+                      <span className="px-2 py-1.5 text-[12px] text-muted-foreground">No subcategories found</span>
+                    ) : (
+                      subcategoryOptions.map((name) => {
+                        const checked = subcategoryFilters.has(name);
+                        return (
+                          <button
+                            key={name}
+                            onClick={() => setSubcategoryFilters((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n; })}
+                            className="flex items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[12px] hover:bg-muted"
+                          >
+                            <span className={`grid h-4 w-4 shrink-0 place-items-center rounded-sm border ${checked ? "border-primary bg-primary text-primary-foreground" : "border-input bg-card"}`}>
+                              {checked && <Check className="h-3 w-3" />}
+                            </span>
+                            <span>{name}</span>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            {(violationFilters.size > 0 || subcategoryFilters.size > 0) && (
+              <button
+                onClick={() => { setViolationFilters(new Set()); setSubcategoryFilters(new Set()); }}
                 className="text-[11px] text-primary hover:underline"
               >
                 Clear filters
               </button>
             )}
-            <div className="ml-auto flex items-center gap-3">
-              <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
-                Rows/page
-                <select
-                  value={pageSize}
-                  onChange={(e) => setPageSize(Number(e.target.value))}
-                  className="h-7 rounded-md border border-input bg-card px-1 text-[11px]"
-                >
-                  {[25, 50, 100].map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
-              </label>
-              <span className="text-[11px] text-muted-foreground">
-                Showing {sorted.length === 0 ? 0 : pageStart + 1}–{Math.min(pageStart + pageSize, sorted.length)} of {sorted.length} (total {rows.length})
-              </span>
-            </div>
+            <span className="ml-auto text-[11px] text-muted-foreground">
+              {sorted.length} of {rows.length} SKUs
+            </span>
           </div>
 
           {/* Table */}
-          <div className="overflow-hidden rounded-md border bg-card">
-
-            <div className="flex">
-              {/* Frozen — 40%, immovable, no horizontal scroll */}
-              <div className="w-auto shrink-0 border-r-2 border-border bg-card">
+          <div className={`rounded-md border bg-card ${sheetFullscreen ? "flex min-h-0 flex-1 flex-col" : ""}`}>
+            <div
+              className={`overflow-auto ${sheetFullscreen ? "min-h-0 flex-1" : "max-h-[calc(100vh-14rem)]"}`}
+            >
+            <div className="flex w-max min-w-full" style={{ zoom: tableZoom / 100 }}>
+              {/* Frozen — immovable on horizontal scroll */}
+              <div className="sticky left-0 z-30 w-auto shrink-0 border-r-2 border-border bg-card">
 
 
                 <FrozenTable
-                  rows={pageRows}
+                  rows={sorted}
                   sortKey={sortKey}
                   sortDir={sortDir}
                   toggleSort={toggleSort}
                   averages={averages}
                 />
               </div>
-              {/* Scrollable — 60% */}
-              <div className="min-w-0 flex-1 overflow-x-auto">
+              {/* Scrollable */}
+              <div className="min-w-0 flex-1">
                 <ScrollTable
-                  rows={pageRows}
+                  rows={sorted}
                   sortKey={sortKey}
                   sortDir={sortDir}
                   toggleSort={toggleSort}
                   averages={averages}
-                  updateRow={updateRow}
+                  updateRowLocal={updateRowLocal}
+                  persistRowFields={persistRowFields}
                   submitted={submitted}
                 />
               </div>
             </div>
+            </div>
           </div>
 
-          {/* Pagination controls */}
-          <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
-            <span>Total demand {totalDemand.toLocaleString()} units</span>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
-                className="h-7 rounded-md border border-input bg-card px-2 text-[11px] disabled:opacity-40 hover:bg-muted"
-              >
-                Prev
-              </button>
-              <span>Page {page} of {pageCount}</span>
-              <button
-                onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
-                disabled={page >= pageCount}
-                className="h-7 rounded-md border border-input bg-card px-2 text-[11px] disabled:opacity-40 hover:bg-muted"
-              >
-                Next
-              </button>
-            </div>
+          <div className={`text-[11px] text-muted-foreground ${sheetFullscreen ? "mt-2 shrink-0" : "mt-2"}`}>
+            Total demand {totalDemand.toLocaleString()} units
+          </div>
           </div>
           </>)}
             </>
@@ -1219,8 +1408,12 @@ function SubCategoryMetricsModal({
 const COL_HEAD_H = "h-9";
 const SUB_HEAD_H = "h-7";
 const ROW_H = "h-10";
-
-type Enriched = { row: SkuRow; calc: ReturnType<typeof deriveRow> };
+const STICKY_GROUP = "sticky top-0 z-20";
+const STICKY_COL = "sticky top-6 z-20";
+const STICKY_AVG = "sticky top-[60px] z-20";
+const STICKY_FROZEN_GROUP = "sticky top-0 left-0 z-30";
+const STICKY_FROZEN_COL = "sticky top-6 left-0 z-30";
+const STICKY_FROZEN_AVG = "sticky top-[60px] left-0 z-30";
 
 function GroupBar({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
@@ -1234,23 +1427,36 @@ function FrozenTable({
   rows, sortKey, sortDir, toggleSort, averages,
 }: {
   rows: Enriched[]; sortKey: string | null; sortDir: SortDir; toggleSort: (k: string) => void;
-  averages: { demandUnits: number | null; totalDemandPct: number | null; nlcValueMix: number | null };
+  averages: ReturnType<typeof computePriceUploadAverages>;
 }) {
   return (
     <table className="w-auto border-collapse text-[12px] [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
-
-
-      <thead className="sticky top-0 z-10 bg-card">
+      <colgroup>
+        <col style={{ width: 110 }} /><col style={{ width: 130 }} /><col style={{ width: 200 }} />
+        <col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} />
+        <col style={{ width: 110 }} /><col style={{ width: 110 }} />
+      </colgroup>
+      <thead>
         <tr>
-          <th colSpan={3} className="h-6 border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Basic Information</th>
+          <th colSpan={3} className={`${STICKY_FROZEN_GROUP} h-6 border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information</th>
+          <th colSpan={3} className={`${STICKY_FROZEN_GROUP} h-6 border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information (cont.)</th>
+          <th colSpan={2} className={`${STICKY_FROZEN_GROUP} h-6 border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
         </tr>
-        <tr className={`${COL_HEAD_H} border-b bg-card`}>
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">FSN ID</th>
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Weight Unit</th>
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">NC SKU Name</th>
+        <tr className={`${COL_HEAD_H} border-b`}>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>FSN ID</th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Weight Unit</th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>NC SKU Name</th>
+          <th className={`${STICKY_FROZEN_COL} border-l bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Special Tags</th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Subcategory</th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-right align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Conv. Factor</th>
+          <th className={`${STICKY_FROZEN_COL} border-l bg-card px-2 align-middle`}><SortHeader align="right" label="Demand Units" active={sortKey==="demandUnits"} dir={sortDir} onClick={() => toggleSort("demandUnits")} /></th>
+          <th className={`${STICKY_FROZEN_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Total Demand %" active={sortKey==="totalDemandPct"} dir={sortDir} onClick={() => toggleSort("totalDemandPct")} /></th>
         </tr>
-        <tr className={`${SUB_HEAD_H} border-b bg-accent/30 text-[11px] font-medium`}>
-          <td colSpan={3} className="px-2 text-muted-foreground">Averages →</td>
+        <tr className={`${SUB_HEAD_H} border-b text-[11px] font-medium`}>
+          <td colSpan={3} className={`${STICKY_FROZEN_AVG} bg-accent px-2 text-muted-foreground`}>Averages →</td>
+          <td colSpan={3} className={`${STICKY_FROZEN_AVG} border-l bg-accent px-2 text-muted-foreground`}>Averages →</td>
+          <td className={`${STICKY_FROZEN_AVG} border-l bg-accent px-2 text-right tabular-nums`}>{averages.demandUnits !== null ? Math.round(averages.demandUnits).toLocaleString() : "—"}</td>
+          <td className={`${STICKY_FROZEN_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.totalDemandPct !== null ? `${averages.totalDemandPct.toFixed(3)}%` : "—"}</td>
         </tr>
       </thead>
       <tbody>
@@ -1268,8 +1474,18 @@ function FrozenTable({
               <td className="whitespace-nowrap px-2 font-mono text-[11px] text-muted-foreground">{row.fsnId}</td>
               <td className="whitespace-nowrap px-2 text-muted-foreground">{row.weightUnit}</td>
               <td className="max-w-[200px] truncate px-2 text-[11px]">{row.ncSkuName || "—"}</td>
-
-
+              <td className="border-l px-2">
+                {row.specialTag && (
+                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                    row.specialTag === "Summer" ? "bg-warn-bg text-warn-foreground" :
+                    row.specialTag === "Seasonal" ? "bg-accent text-accent-foreground" : "bg-muted text-foreground"
+                  }`}>{row.specialTag}</span>
+                )}
+              </td>
+              <td className="px-2 text-muted-foreground">{row.subcategory}</td>
+              <td className="px-2 text-right tabular-nums">{row.conversionFactor.toFixed(2)}</td>
+              <td className="border-l px-2 text-right tabular-nums">{row.demandUnits.toLocaleString()}</td>
+              <td className="px-2 text-right tabular-nums">{calc.totalDemandPct.toFixed(3)}%</td>
             </tr>
           );
         })}
@@ -1280,86 +1496,74 @@ function FrozenTable({
 
 // ---------- Scrollable right table ----------
 function ScrollTable({
-  rows, sortKey, sortDir, toggleSort, averages, updateRow, submitted,
+  rows, sortKey, sortDir, toggleSort, averages, updateRowLocal, persistRowFields, submitted,
 }: {
   rows: Enriched[];
   sortKey: string | null;
   sortDir: SortDir;
   toggleSort: (k: string) => void;
   averages: any;
-  updateRow: (id: string, p: Partial<SkuRow>) => void;
+  updateRowLocal: (id: string, p: Partial<SkuRow>) => void;
+  persistRowFields: (id: string, weightUnit: string, p: Partial<SkuRow>) => void;
   submitted: boolean;
 }) {
   return (
-    <table className="min-w-[2400px] border-collapse text-[12px] [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
+    <table className="min-w-[1850px] border-collapse text-[12px] [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
       <colgroup>
-        {/* Basic Info cont. (3): Special Tags, Subcategory, Conv Factor */}
-        <col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} />
-        {/* Demand Info (8): Demand Units, Total Demand %, NLC Value Mix, GRN/kg, Prev GRN/unit, GRN/unit, GRN Diff, Adjusted GRN */}
-        <col style={{ width: 110 }} /><col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 130 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 120 }} />
+        {/* Demand Info (6): NLC Value Mix, GRN/kg, Prev GRN/unit, GRN/unit, GRN Diff, Adjusted GRN */}
+        <col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 130 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 120 }} />
         {/* Benchmark Info (12) */}
         <col style={{ width: 90 }} /><col style={{ width: 80 }} /><col style={{ width: 120 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} />
       </colgroup>
-      <thead className="sticky top-0 z-10 bg-card">
+      <thead>
         <tr className="h-6">
-          <th colSpan={3} className="h-6 border-b bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Basic Information (cont.)</th>
-          <th colSpan={8} className="h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Demand Information</th>
-          <th colSpan={12} className="h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Benchmark Information</th>
+          <th colSpan={6} className={`${STICKY_GROUP} h-6 border-b bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
+          <th colSpan={12} className={`${STICKY_GROUP} h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Benchmark Information</th>
         </tr>
 
-        <tr className={`${COL_HEAD_H} border-b bg-card`}>
-          {/* Basic Info cont. */}
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Special Tags</th>
-          <th className="px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Subcategory</th>
-          <th className="px-2 text-right align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Conv. Factor</th>
+        <tr className={`${COL_HEAD_H} border-b`}>
           {/* Demand Info */}
-          <th className="border-l px-2 align-middle"><SortHeader align="right" label="Demand Units" active={sortKey==="demandUnits"} dir={sortDir} onClick={() => toggleSort("demandUnits")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Total Demand %" active={sortKey==="totalDemandPct"} dir={sortDir} onClick={() => toggleSort("totalDemandPct")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="NLC Value Mix" active={sortKey==="nlcValueMix"} dir={sortDir} onClick={() => toggleSort("nlcValueMix")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="GRN ₹/kg" active={sortKey==="grnPricePerKg"} dir={sortDir} onClick={() => toggleSort("grnPricePerKg")} /></th>
-          <th className="px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"><Tip text="GRN ₹/unit on day T-n-1 (previous day). Read-only.">Prev Day GRN ₹/unit</Tip></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="GRN ₹/unit" active={sortKey==="grnPerUnit"} dir={sortDir} onClick={() => toggleSort("grnPerUnit")} /></th>
-          <th className="px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"><Tip text="(GRN ₹/unit + Adjusted GRN) − Prev Day GRN ₹/unit">GRN Diff</Tip></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Adjusted GRN" active={sortKey==="adjustedGrn"} dir={sortDir} onClick={() => toggleSort("adjustedGrn")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="NLC Value Mix" active={sortKey==="nlcValueMix"} dir={sortDir} onClick={() => toggleSort("nlcValueMix")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="GRN ₹/kg" active={sortKey==="grnPricePerKg"} dir={sortDir} onClick={() => toggleSort("grnPricePerKg")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}><Tip text="GRN ₹/unit on day T-n-1 (previous day). Read-only.">Prev Day GRN ₹/unit</Tip></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="GRN ₹/unit" active={sortKey==="grnPerUnit"} dir={sortDir} onClick={() => toggleSort("grnPerUnit")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}><Tip text="(GRN ₹/unit + Adjusted GRN) − Prev Day GRN ₹/unit">GRN Diff</Tip></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Adjusted GRN" active={sortKey==="adjustedGrn"} dir={sortDir} onClick={() => toggleSort("adjustedGrn")} /></th>
           {/* Benchmark Info */}
-          <th className="border-l px-2 align-middle"><SortHeader align="right" label="Blinkit SP" active={sortKey==="blinkitSp"} dir={sortDir} onClick={() => toggleSort("blinkitSp")} /></th>
-          <th className="px-2 align-middle text-center text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">WSP Trend</th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Quoted PP" active={sortKey==="quotedPp"} dir={sortDir} onClick={() => toggleSort("quotedPp")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Negotiated PP" active={sortKey==="negotiatedPp"} dir={sortDir} onClick={() => toggleSort("negotiatedPp")} /></th>
-          <th className="px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Suggested PP</th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="NLC" active={sortKey==="nlc"} dir={sortDir} onClick={() => toggleSort("nlc")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="PI %" active={sortKey==="piPct"} dir={sortDir} onClick={() => toggleSort("piPct")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="GM" active={sortKey==="gm"} dir={sortDir} onClick={() => toggleSort("gm")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Deflection %" active={sortKey==="priceDeflectionPct"} dir={sortDir} onClick={() => toggleSort("priceDeflectionPct")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Impact PP Diff" active={sortKey==="impactPpDiff"} dir={sortDir} onClick={() => toggleSort("impactPpDiff")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="Impact GM" active={sortKey==="impactGm"} dir={sortDir} onClick={() => toggleSort("impactGm")} /></th>
-          <th className="px-2 align-middle"><SortHeader align="right" label="BK Value Mix" active={sortKey==="valueMix"} dir={sortDir} onClick={() => toggleSort("valueMix")} /></th>
+          <th className={`${STICKY_COL} border-l bg-card px-2 align-middle`}><SortHeader align="right" label="Blinkit SP" active={sortKey==="blinkitSp"} dir={sortDir} onClick={() => toggleSort("blinkitSp")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle text-center text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>WSP Trend</th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Quoted PP" active={sortKey==="quotedPp"} dir={sortDir} onClick={() => toggleSort("quotedPp")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Negotiated PP" active={sortKey==="negotiatedPp"} dir={sortDir} onClick={() => toggleSort("negotiatedPp")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Suggested PP</th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="NLC" active={sortKey==="nlc"} dir={sortDir} onClick={() => toggleSort("nlc")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="PI %" active={sortKey==="piPct"} dir={sortDir} onClick={() => toggleSort("piPct")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="GM" active={sortKey==="gm"} dir={sortDir} onClick={() => toggleSort("gm")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Deflection %" active={sortKey==="priceDeflectionPct"} dir={sortDir} onClick={() => toggleSort("priceDeflectionPct")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Impact PP Diff" active={sortKey==="impactPpDiff"} dir={sortDir} onClick={() => toggleSort("impactPpDiff")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Impact GM" active={sortKey==="impactGm"} dir={sortDir} onClick={() => toggleSort("impactGm")} /></th>
+          <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="BK Value Mix" active={sortKey==="valueMix"} dir={sortDir} onClick={() => toggleSort("valueMix")} /></th>
         </tr>
         {/* Averages */}
-        <tr className={`${SUB_HEAD_H} border-b bg-accent/30 text-[11px] font-medium`}>
-          <td className="px-2 text-muted-foreground" colSpan={3}>Averages →</td>
-          {/* Demand */}
-          <td className="border-l px-2 text-right tabular-nums">{averages.demandUnits !== null ? Math.round(averages.demandUnits).toLocaleString() : "—"}</td>
-          <td className="px-2 text-right tabular-nums">{averages.totalDemandPct !== null ? `${averages.totalDemandPct.toFixed(3)}%` : "—"}</td>
-          <td className="px-2 text-right tabular-nums">{averages.nlcValueMix !== null ? `₹${Math.round(averages.nlcValueMix).toLocaleString()}` : "—"}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.grnPricePerKg)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.prevDayGrnPerUnit)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.grnPerUnit)}</td>
-          <td className="px-2 text-right tabular-nums">{averages.grnDiff !== null ? `${averages.grnDiff >= 0 ? "+" : ""}${averages.grnDiff.toFixed(2)}` : "—"}</td>
-          <td className="px-2 text-right tabular-nums">{averages.adjustedGrn !== null ? `${averages.adjustedGrn >= 0 ? "+" : ""}${averages.adjustedGrn.toFixed(2)}` : "—"}</td>
+        <tr className={`${SUB_HEAD_H} border-b text-[11px] font-medium`}>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.nlcValueMix !== null ? `₹${Math.round(averages.nlcValueMix).toLocaleString()}` : "—"}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.grnPricePerKg)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.prevDayGrnPerUnit)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.grnPerUnit)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.grnDiff !== null ? `${averages.grnDiff >= 0 ? "+" : ""}${averages.grnDiff.toFixed(2)}` : "—"}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.adjustedGrn !== null ? `${averages.adjustedGrn >= 0 ? "+" : ""}${averages.adjustedGrn.toFixed(2)}` : "—"}</td>
           {/* Benchmark */}
-          <td className="border-l px-2 text-right tabular-nums">{fmt(averages.blinkitSp)}</td>
-          <td className="px-2 text-center text-muted-foreground">—</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.quotedPp)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.negotiatedPp)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.suggestedPp)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.nlc)}</td>
-          <td className="px-2 text-right tabular-nums">{num(averages.piPct)}%</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.gm)}</td>
-          <td className="px-2 text-right tabular-nums">{num(averages.priceDeflectionPct)}%</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.impactPpDiff)}</td>
-          <td className="px-2 text-right tabular-nums">{fmt(averages.impactGm)}</td>
-          <td className="px-2 text-right tabular-nums">{averages.valueMix !== null ? `₹${Math.round(averages.valueMix).toLocaleString()}` : "—"}</td>
+          <td className={`${STICKY_AVG} border-l bg-accent px-2 text-right tabular-nums`}>{fmt(averages.blinkitSp)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-center text-muted-foreground`}>—</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.quotedPp)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.negotiatedPp)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.suggestedPp)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.nlc)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{num(averages.piPct)}%</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.gm)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{num(averages.priceDeflectionPct)}%</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.impactPpDiff)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.impactGm)}</td>
+          <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.valueMix !== null ? `₹${Math.round(averages.valueMix).toLocaleString()}` : "—"}</td>
         </tr>
       </thead>
 
@@ -1371,36 +1575,24 @@ function ScrollTable({
             (!row.negotiatedLocked || row.negotiatedPp === row.lastLockedNegotiated);
           return (
             <tr key={row.fsnId} className={`${ROW_H} border-b last:border-b-0 hover:bg-muted/40`}>
-              {/* Basic Info cont. */}
-              <td className="px-2">
-                {row.specialTag && (
-                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                    row.specialTag === "Summer" ? "bg-warn-bg text-warn-foreground" :
-                    row.specialTag === "Seasonal" ? "bg-accent text-accent-foreground" : "bg-muted text-foreground"
-                  }`}>{row.specialTag}</span>
-                )}
-              </td>
-              <td className="px-2 text-muted-foreground">{row.subcategory}</td>
-              <td className="px-2 text-right tabular-nums">{row.conversionFactor.toFixed(2)}</td>
-
               {/* Demand Info */}
-              <td className="border-l px-2 text-right tabular-nums">{row.demandUnits.toLocaleString()}</td>
-              <td className="px-2 text-right tabular-nums">{calc.totalDemandPct.toFixed(3)}%</td>
               <td className="px-2 text-right tabular-nums">₹{Math.round(calc.nlcValueMix).toLocaleString()}</td>
 
-              {/* GRN ₹/kg — locked by default; unlock to edit, lock to save */}
+              {/* GRN ₹/kg — locked by default; click field to edit, lock to save */}
               <td className={`px-2 ${row.grnPricePerKg === null ? "bg-warn-bg/40" : ""}`}>
                 <NullableLockedInput
                   value={row.grnPricePerKg}
                   locked={row.grnLocked ?? true}
                   disabled={submitted}
                   warn={row.grnPricePerKg === null}
-                  onChange={(v) => updateRow(row.fsnId, { grnPricePerKg: v })}
+                  onChange={(v) => updateRowLocal(row.fsnId, { grnPricePerKg: v })}
+                  onUnlock={() => updateRowLocal(row.fsnId, { grnLocked: false })}
                   onToggleLock={() => {
                     if (row.grnLocked) {
-                      updateRow(row.fsnId, { grnLocked: false });
+                      updateRowLocal(row.fsnId, { grnLocked: false });
                     } else {
-                      updateRow(row.fsnId, { grnLocked: true, grnPricePerKg: row.grnPricePerKg });
+                      updateRowLocal(row.fsnId, { grnLocked: true });
+                      persistRowFields(row.fsnId, row.weightUnit, { grnPricePerKg: row.grnPricePerKg });
                     }
                   }}
                 />
@@ -1423,42 +1615,49 @@ function ScrollTable({
                   value={row.adjustedGrn ?? 0}
                   locked={row.adjustedGrnLocked ?? true}
                   disabled={submitted}
-                  onChange={(v) => updateRow(row.fsnId, { adjustedGrn: v })}
+                  onChange={(v) => updateRowLocal(row.fsnId, { adjustedGrn: v })}
+                  onUnlock={() => updateRowLocal(row.fsnId, { adjustedGrnLocked: false })}
                   onToggleLock={() => {
                     if (row.adjustedGrnLocked) {
-                      updateRow(row.fsnId, { adjustedGrnLocked: false });
+                      updateRowLocal(row.fsnId, { adjustedGrnLocked: false });
                     } else {
                       const v = row.adjustedGrn ?? 0;
                       const patch: Partial<SkuRow> = { adjustedGrnLocked: true };
+                      const persist: Partial<SkuRow> = { adjustedGrn: v };
                       if (v !== 0 && calc.grnPerUnit !== null) {
                         const newQ = calc.grnPerUnit + v;
                         patch.quotedPp = newQ;
                         patch.quotedTouched = true;
+                        persist.quotedPp = newQ;
                         if (row.negotiatedLocked || !row.negotiatedTouched) {
                           patch.negotiatedPp = newQ;
                           patch.lastLockedNegotiated = newQ;
+                          persist.negotiatedPp = newQ;
                         }
                       }
-                      updateRow(row.fsnId, patch);
+                      updateRowLocal(row.fsnId, patch);
+                      persistRowFields(row.fsnId, row.weightUnit, persist);
                     }
                   }}
                 />
               </td>
 
               {/* Benchmark Info */}
-              {/* Blinkit SP — locked by default; unlock to edit, lock to save */}
+              {/* Blinkit SP — locked by default; click field to edit, lock to save */}
               <td className={`border-l px-2 ${row.blinkitSp === null ? "bg-warn-bg/40" : ""}`}>
                 <NullableLockedInput
                   value={row.blinkitSp}
                   locked={row.blinkitLocked ?? true}
                   disabled={submitted}
                   warn={row.blinkitSp === null}
-                  onChange={(v) => updateRow(row.fsnId, { blinkitSp: v })}
+                  onChange={(v) => updateRowLocal(row.fsnId, { blinkitSp: v })}
+                  onUnlock={() => updateRowLocal(row.fsnId, { blinkitLocked: false })}
                   onToggleLock={() => {
                     if (row.blinkitLocked) {
-                      updateRow(row.fsnId, { blinkitLocked: false });
+                      updateRowLocal(row.fsnId, { blinkitLocked: false });
                     } else {
-                      updateRow(row.fsnId, { blinkitLocked: true, blinkitSp: row.blinkitSp });
+                      updateRowLocal(row.fsnId, { blinkitLocked: true });
+                      persistRowFields(row.fsnId, row.weightUnit, { blinkitSp: row.blinkitSp });
                     }
                   }}
                 />
@@ -1482,16 +1681,21 @@ function ScrollTable({
                   onChange={(v) => {
                     const next: Partial<SkuRow> = { quotedPp: v, quotedTouched: true };
                     setPartialIfNegotiatedFollows(next, row, v);
-                    updateRow(row.fsnId, next);
+                    updateRowLocal(row.fsnId, next);
                   }}
+                  onUnlock={() => updateRowLocal(row.fsnId, { quotedLocked: false })}
                   onToggleLock={() => {
                     if (!row.quotedLocked) {
-                      updateRow(row.fsnId, {
+                      updateRowLocal(row.fsnId, {
                         quotedLocked: true,
                         negotiatedPp: row.quotedPp,
                       });
+                      persistRowFields(row.fsnId, row.weightUnit, {
+                        quotedPp: row.quotedPp,
+                        negotiatedPp: row.quotedPp,
+                      });
                     } else {
-                      updateRow(row.fsnId, { quotedLocked: false });
+                      updateRowLocal(row.fsnId, { quotedLocked: false });
                     }
                   }}
                 />
@@ -1503,15 +1707,17 @@ function ScrollTable({
                   locked={row.negotiatedLocked}
                   disabled={submitted}
                   highlight={row.suggestedPp !== null && !row.negotiatedLocked}
-                  onChange={(v) => updateRow(row.fsnId, { negotiatedPp: v, negotiatedTouched: true })}
+                  onChange={(v) => updateRowLocal(row.fsnId, { negotiatedPp: v, negotiatedTouched: true })}
+                  onUnlock={() => updateRowLocal(row.fsnId, { negotiatedLocked: false })}
                   onToggleLock={() => {
                     if (!row.negotiatedLocked) {
-                      updateRow(row.fsnId, {
+                      updateRowLocal(row.fsnId, {
                         negotiatedLocked: true,
                         lastLockedNegotiated: row.negotiatedPp,
                       });
+                      persistRowFields(row.fsnId, row.weightUnit, { negotiatedPp: row.negotiatedPp });
                     } else {
-                      updateRow(row.fsnId, { negotiatedLocked: false });
+                      updateRowLocal(row.fsnId, { negotiatedLocked: false });
                     }
                   }}
                 />
@@ -1556,14 +1762,29 @@ function setPartialIfNegotiatedFollows(_patch: Partial<SkuRow>, _row: SkuRow, _v
   // placeholder: negotiated only syncs on lock per spec
 }
 
+function unlockOnEdit(
+  locked: boolean,
+  disabled: boolean | undefined,
+  onUnlock: () => void,
+) {
+  return (e: ReactMouseEvent<HTMLInputElement>) => {
+    if (locked && !disabled) {
+      e.preventDefault();
+      onUnlock();
+      queueMicrotask(() => e.currentTarget.focus());
+    }
+  };
+}
+
 function LockedPriceInput({
-  value, locked, disabled, highlight, onChange, onToggleLock,
+  value, locked, disabled, highlight, onChange, onUnlock, onToggleLock,
 }: {
   value: number;
   locked: boolean;
   disabled?: boolean;
   highlight?: boolean;
   onChange: (v: number) => void;
+  onUnlock: () => void;
   onToggleLock: () => void;
 }) {
   const lockBlocked = !locked && value < 1;
@@ -1572,16 +1793,19 @@ function LockedPriceInput({
       <input
         type="number"
         value={Number.isFinite(value) ? value : 0}
-        disabled={locked || disabled}
+        readOnly={locked}
+        disabled={disabled}
+        onMouseDown={unlockOnEdit(locked, disabled, onUnlock)}
         onChange={(e) => {
+          if (locked) return;
           const raw = e.target.value;
           if (raw === "") { onChange(0); return; }
           const v = parseFloat(raw);
           if (Number.isFinite(v) && v >= 0) onChange(v);
         }}
         className={`h-7 w-20 rounded-sm border px-1 text-right text-[12px] tabular-nums outline-none focus:border-primary disabled:bg-muted disabled:text-muted-foreground ${
-          highlight ? "border-suggest bg-suggest-bg/40" : "border-input bg-card"
-        }`}
+          locked ? "cursor-pointer bg-muted/50 text-muted-foreground" : ""
+        } ${highlight ? "border-suggest bg-suggest-bg/40" : "border-input bg-card"}`}
       />
       <button
         onClick={onToggleLock}
@@ -1598,13 +1822,14 @@ function LockedPriceInput({
 }
 
 function NullableLockedInput({
-  value, locked, disabled, warn, onChange, onToggleLock,
+  value, locked, disabled, warn, onChange, onUnlock, onToggleLock,
 }: {
   value: number | null;
   locked: boolean;
   disabled?: boolean;
   warn?: boolean;
   onChange: (v: number | null) => void;
+  onUnlock: () => void;
   onToggleLock: () => void;
 }) {
   const lockBlocked = !locked && value !== null && value < 1;
@@ -1614,16 +1839,19 @@ function NullableLockedInput({
         type="number"
         value={value === null ? "" : value}
         placeholder="NA"
-        disabled={locked || disabled}
+        readOnly={locked}
+        disabled={disabled}
+        onMouseDown={unlockOnEdit(locked, disabled, onUnlock)}
         onChange={(e) => {
+          if (locked) return;
           const raw = e.target.value;
           if (raw === "") { onChange(null); return; }
           const v = parseFloat(raw);
           if (Number.isFinite(v) && v >= 0) onChange(v);
         }}
         className={`h-7 w-20 rounded-sm border px-1 text-right text-[12px] tabular-nums outline-none focus:border-primary disabled:bg-muted disabled:text-muted-foreground ${
-          warn && value === null ? "border-warn bg-warn-bg/40" : "border-input bg-card"
-        }`}
+          locked ? "cursor-pointer bg-muted/50 text-muted-foreground" : ""
+        } ${warn && value === null ? "border-warn bg-warn-bg/40" : "border-input bg-card"}`}
       />
       <button
         onClick={onToggleLock}
@@ -1642,12 +1870,13 @@ function NullableLockedInput({
 
 // Signed adjusted GRN input — default 0, allows negative/positive numbers. Requires lock to save.
 function AdjustedGrnInput({
-  value, locked, disabled, onChange, onToggleLock,
+  value, locked, disabled, onChange, onUnlock, onToggleLock,
 }: {
   value: number;
   locked: boolean;
   disabled?: boolean;
   onChange: (v: number) => void;
+  onUnlock: () => void;
   onToggleLock: () => void;
 }) {
   const nonZero = value !== 0;
@@ -1656,16 +1885,19 @@ function AdjustedGrnInput({
       <input
         type="number"
         value={Number.isFinite(value) ? value : 0}
-        disabled={locked || disabled}
+        readOnly={locked}
+        disabled={disabled}
+        onMouseDown={unlockOnEdit(locked, disabled, onUnlock)}
         onChange={(e) => {
+          if (locked) return;
           const raw = e.target.value;
           if (raw === "" || raw === "-") { onChange(0); return; }
           const v = parseFloat(raw);
           if (Number.isFinite(v)) onChange(v);
         }}
         className={`h-7 w-20 rounded-sm border px-1 text-right text-[12px] tabular-nums outline-none focus:border-primary disabled:bg-muted disabled:text-muted-foreground ${
-          nonZero ? "border-primary/50 bg-accent/30 font-semibold" : "border-input bg-card"
-        }`}
+          locked ? "cursor-pointer bg-muted/50 text-muted-foreground" : ""
+        } ${nonZero ? "border-primary/50 bg-accent/30 font-semibold" : "border-input bg-card"}`}
       />
       <button
         onClick={onToggleLock}
