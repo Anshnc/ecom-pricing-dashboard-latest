@@ -936,7 +936,7 @@ export function PricingDashboard() {
           )}
 
           {/* Search + violation filter */}
-          <div className="mb-2 flex shrink-0 flex-wrap items-center gap-2">
+          <div className="relative z-40 mb-2 flex shrink-0 flex-wrap items-center gap-2">
             <div className="relative">
               <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
               <input
@@ -959,7 +959,7 @@ export function PricingDashboard() {
                 <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
               </button>
               {filterOpen && (
-                <div className={`absolute left-0 top-9 w-64 rounded-md border bg-card p-2 shadow-lg ${sheetFullscreen ? "z-[60]" : "z-30"}`}>
+                <div className="absolute left-0 top-9 z-50 w-64 rounded-md border bg-card p-2 shadow-lg">
                   <div className="mb-1 flex items-center justify-between px-1">
                     <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Rule Violations</span>
                     <div className="flex items-center gap-2">
@@ -1006,7 +1006,7 @@ export function PricingDashboard() {
                 <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
               </button>
               {subcatFilterOpen && (
-                <div className={`absolute left-0 top-9 max-h-72 w-64 overflow-y-auto rounded-md border bg-card p-2 shadow-lg ${sheetFullscreen ? "z-[60]" : "z-30"}`}>
+                <div className="absolute left-0 top-9 z-50 max-h-72 w-64 overflow-y-auto rounded-md border bg-card p-2 shadow-lg">
                   <div className="mb-1 flex items-center justify-between px-1">
                     <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Subcategory</span>
                     <div className="flex items-center gap-2">
