@@ -214,8 +214,16 @@ function deriveRow(r: SkuRow, totalDemand: number) {
   const piPct = r.blinkitSp ? ((r.blinkitSp - nlc) / r.blinkitSp) * 100 : null;
   const gm = grnPerUnit !== null ? nlc - grnPerUnit : null;
   const totalDemandPct = totalDemand ? (r.demandUnits / totalDemand) * 100 : 0;
-  const impactPpDiff = grnPerUnit !== null ? (r.negotiatedPp - grnPerUnit) * (totalDemandPct / 100) : null;
-  const impactGm = gm !== null ? gm * (totalDemandPct / 100) : null;
+  const quotedNlc = r.quotedPp + r.packagingCost + r.fmlCost + r.processingCost;
+  const impactGmBase = grnPerUnit !== null ? quotedNlc - grnPerUnit : null;
+  const impactPpDiff =
+    grnPerUnit !== null && r.piMixPct !== null
+      ? (r.quotedPp - grnPerUnit) * (r.piMixPct / 100)
+      : null;
+  const impactGm =
+    impactGmBase !== null && r.piMixPct !== null
+      ? impactGmBase * (r.piMixPct / 100)
+      : null;
   const valueMix = r.blinkitSp !== null ? r.blinkitSp * r.demandUnits : null;
   const nlcValueMix = nlc * r.demandUnits;
   return { grnPerUnit, prevDayGrnPerUnit: r.prevDayGrnPerUnit ?? null, grnDiff, nlc, piPct, gm, totalDemandPct, impactPpDiff, impactGm, valueMix, nlcValueMix };
@@ -2006,10 +2014,12 @@ function UploadPanel({ kind }: { kind: "demand" | "sku" }) {
             subcategory: (getK("subcat", "subcategory", "Subcategory") ?? null) as string | null,
             demand_units: toNum(getK("orderedlot", "demand_units", "OrderedLot", "Demand Units")),
             demand_pct: toNum(getK("Mix", "demand_pct", "Total Demand %")),
-            grn_price_per_kg: toNum(getK("GRN_Qty", "grn_price_per_kg", "GRN ₹/kg")),
-            grn_price_per_unit: toNum(getK("GRN_Unit", "grn_price_per_unit", "GRN ₹/unit")),
-            prev_grn_price_per_kg: toNum(getK("Prev_GRN_Qty", "prev_grn_price_per_kg")),
-            prev_grn_price_per_unit: toNum(getK("Prev_GRN_Unit", "prev_grn_price_per_unit", "Prev Day GRN ₹/unit")),
+            grn_price_per_kg: toNum(getK("T-1 GRN Qty", "GRN_Qty", "grn_price_per_kg", "GRN ₹/kg")),
+            grn_price_per_unit: toNum(getK("T-1 GRN Unit", "GRN_Unit", "grn_price_per_unit", "GRN ₹/unit")),
+            prev_grn_price_per_kg: toNum(getK("T-2 GRN Qty", "Prev_GRN_Qty", "prev_grn_price_per_kg")),
+            prev_grn_price_per_unit: toNum(getK("T-2 GRN Unit", "Prev_GRN_Unit", "prev_grn_price_per_unit", "Prev Day GRN ₹/unit")),
+            t3_grn_price_per_kg: toNum(getK("T-3 GRN Qty", "t3_grn_price_per_kg")),
+            t3_grn_price_per_unit: toNum(getK("T-3 GRN Unit", "t3_grn_price_per_unit")),
           };
         }).filter((p) => p.delivery_date && p.city && p.sku_id);
 

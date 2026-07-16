@@ -32,6 +32,8 @@ export type PricingSheetRow = {
   grn_price_per_unit: number | null;
   prev_grn_price_per_kg: number | null;
   prev_grn_price_per_unit: number | null;
+  t3_grn_price_per_kg: number | null;
+  t3_grn_price_per_unit: number | null;
   grn_diff: number | null;
 
   // editable
