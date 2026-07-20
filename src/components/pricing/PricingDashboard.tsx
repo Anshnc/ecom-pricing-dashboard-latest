@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from "react";
+import { useMemo, useState, useEffect, useRef, useCallback, type MouseEvent as ReactMouseEvent } from "react";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
 import { usePricingSheet } from "@/hooks/usePricingSheet";
 import { useSubcategories } from "@/hooks/useSubcategories";
@@ -337,10 +337,35 @@ export function PricingDashboard() {
     SEED.map((r, i) => ({ ...r, skuId: `SKU${r.fsnId.slice(3)}`, quotedLocked: true, negotiatedLocked: true, adjustedGrn: 0, adjustedGrnLocked: true, wspTrend: (["up","down","flat","up","flat","down","up","flat","down","up"] as const)[i], prevDayGrnPerUnit: ([140, 44, null, null, 21, 415, 17, 27, null, 33] as (number | null)[])[i] }))
   );
 
-  // Live-load pricing_sheet rows for the selected city + delivery date.
+  // Live-load pricing_sheet rows when the user opens the sheet (Fetch/Create).
   const { rows: dbRows, updateRow: dbUpdateRow, submitSheet: dbSubmit, refetch: dbRefetch } =
-    usePricingSheet({ city, deliveryDate });
+    usePricingSheet({ city, deliveryDate, autoFetch: false });
   const { subcategoryNames, resolveSubcategory } = useSubcategories();
+
+  // Lightweight existence check for Create vs Fetch button (no full sheet load).
+  const [sheetExists, setSheetExists] = useState<boolean | null>(null);
+  const checkSheetExists = useCallback(async () => {
+    const { count, error } = await supabase
+      .from("pricing_sheet")
+      .select("id", { count: "exact", head: true })
+      .eq("city", city)
+      .eq("delivery_date", deliveryDate);
+    setSheetExists(!error && (count ?? 0) > 0);
+  }, [city, deliveryDate]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSheetExists(null);
+    (async () => {
+      const { count, error } = await supabase
+        .from("pricing_sheet")
+        .select("id", { count: "exact", head: true })
+        .eq("city", city)
+        .eq("delivery_date", deliveryDate);
+      if (!cancelled) setSheetExists(!error && (count ?? 0) > 0);
+    })();
+    return () => { cancelled = true; };
+  }, [city, deliveryDate]);
 
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const SAVE_MAP: Record<string, keyof PricingSheetRow> = {
@@ -436,9 +461,9 @@ export function PricingDashboard() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  const isTomorrow = deliveryDate === tomorrowISO();
-  // Create only when tomorrow + no rows exist yet; otherwise show Fetch.
-  const showCreate = isTomorrow && dbRows.length === 0;
+  const isPreviousDate = deliveryDate < tomorrowISO();
+  // Create when no sheet exists for this date+city; Fetch for past/today dates or existing sheets.
+  const showCreate = sheetExists === false && !isPreviousDate;
   const maxDate = tomorrowISO();
 
   const totalDemand = useMemo(() => rows.reduce((s, r) => s + r.demandUnits, 0), [rows]);
@@ -653,6 +678,7 @@ export function PricingDashboard() {
 
   const onCreateOrFetch = async () => {
     await dbRefetch();
+    await checkSheetExists();
     setSheetCreated(true);
     if (status === "draft") setStatus("created");
   };
@@ -846,9 +872,16 @@ export function PricingDashboard() {
             </div>
             <button
               onClick={onCreateOrFetch}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:opacity-90"
+              disabled={sheetExists === null}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {showCreate ? <><Plus className="h-3.5 w-3.5" /> Create</> : <><RefreshCw className="h-3.5 w-3.5" /> Fetch</>}
+              {sheetExists === null ? (
+                <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> …</>
+              ) : showCreate ? (
+                <><Plus className="h-3.5 w-3.5" /> Create</>
+              ) : (
+                <><RefreshCw className="h-3.5 w-3.5" /> Fetch</>
+              )}
             </button>
           </div>
 
@@ -1440,31 +1473,21 @@ function FrozenTable({
   return (
     <table className="w-auto border-collapse text-[12px] [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
       <colgroup>
-        <col style={{ width: 110 }} /><col style={{ width: 130 }} /><col style={{ width: 200 }} />
-        <col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} />
-        <col style={{ width: 110 }} /><col style={{ width: 110 }} />
+        <col style={{ width: 110 }} /><col style={{ width: 130 }} /><col style={{ width: 110 }} />
       </colgroup>
       <thead>
         <tr>
-          <th colSpan={3} className={`${STICKY_FROZEN_GROUP} h-6 border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information</th>
-          <th colSpan={3} className={`${STICKY_FROZEN_GROUP} h-6 border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information (cont.)</th>
-          <th colSpan={2} className={`${STICKY_FROZEN_GROUP} h-6 border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
+          <th colSpan={2} className={`${STICKY_FROZEN_GROUP} h-6 border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information</th>
+          <th colSpan={1} className={`${STICKY_FROZEN_GROUP} h-6 border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
         </tr>
         <tr className={`${COL_HEAD_H} border-b`}>
           <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>FSN ID</th>
           <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Weight Unit</th>
-          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>NC SKU Name</th>
-          <th className={`${STICKY_FROZEN_COL} border-l bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Special Tags</th>
-          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Subcategory</th>
-          <th className={`${STICKY_FROZEN_COL} bg-card px-2 text-right align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Conv. Factor</th>
-          <th className={`${STICKY_FROZEN_COL} border-l bg-card px-2 align-middle`}><SortHeader align="right" label="Demand Units" active={sortKey==="demandUnits"} dir={sortDir} onClick={() => toggleSort("demandUnits")} /></th>
-          <th className={`${STICKY_FROZEN_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="Total Demand %" active={sortKey==="totalDemandPct"} dir={sortDir} onClick={() => toggleSort("totalDemandPct")} /></th>
+          <th className={`${STICKY_FROZEN_COL} border-l bg-card px-2 align-middle`}><SortHeader align="right" label="Total Demand %" active={sortKey==="totalDemandPct"} dir={sortDir} onClick={() => toggleSort("totalDemandPct")} /></th>
         </tr>
         <tr className={`${SUB_HEAD_H} border-b text-[11px] font-medium`}>
-          <td colSpan={3} className={`${STICKY_FROZEN_AVG} bg-accent px-2 text-muted-foreground`}>Averages →</td>
-          <td colSpan={3} className={`${STICKY_FROZEN_AVG} border-l bg-accent px-2 text-muted-foreground`}>Averages →</td>
-          <td className={`${STICKY_FROZEN_AVG} border-l bg-accent px-2 text-right tabular-nums`}>{averages.demandUnits !== null ? Math.round(averages.demandUnits).toLocaleString() : "—"}</td>
-          <td className={`${STICKY_FROZEN_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.totalDemandPct !== null ? `${averages.totalDemandPct.toFixed(3)}%` : "—"}</td>
+          <td colSpan={2} className={`${STICKY_FROZEN_AVG} bg-accent px-2 text-muted-foreground`}>Averages →</td>
+          <td className={`${STICKY_FROZEN_AVG} border-l bg-accent px-2 text-right tabular-nums`}>{averages.totalDemandPct !== null ? `${averages.totalDemandPct.toFixed(3)}%` : "—"}</td>
         </tr>
       </thead>
       <tbody>
@@ -1481,19 +1504,7 @@ function FrozenTable({
             <tr key={row.fsnId} className={`${ROW_H} border-b last:border-b-0 hover:bg-muted/40 ${rowCls}`}>
               <td className="whitespace-nowrap px-2 font-mono text-[11px] text-muted-foreground">{row.fsnId}</td>
               <td className="whitespace-nowrap px-2 text-muted-foreground">{row.weightUnit}</td>
-              <td className="max-w-[200px] truncate px-2 text-[11px]">{row.ncSkuName || "—"}</td>
-              <td className="border-l px-2">
-                {row.specialTag && (
-                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-                    row.specialTag === "Summer" ? "bg-warn-bg text-warn-foreground" :
-                    row.specialTag === "Seasonal" ? "bg-accent text-accent-foreground" : "bg-muted text-foreground"
-                  }`}>{row.specialTag}</span>
-                )}
-              </td>
-              <td className="px-2 text-muted-foreground">{row.subcategory}</td>
-              <td className="px-2 text-right tabular-nums">{row.conversionFactor.toFixed(2)}</td>
-              <td className="border-l px-2 text-right tabular-nums">{row.demandUnits.toLocaleString()}</td>
-              <td className="px-2 text-right tabular-nums">{calc.totalDemandPct.toFixed(3)}%</td>
+              <td className="border-l px-2 text-right tabular-nums">{calc.totalDemandPct.toFixed(3)}%</td>
             </tr>
           );
         })}
@@ -1518,6 +1529,8 @@ function ScrollTable({
   return (
     <table className="min-w-[1850px] border-collapse text-[12px] [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
       <colgroup>
+        {/* Basic Info (scrollable): NC SKU Name, Special Tags, Subcategory, Conv. Factor, Demand Units */}
+        <col style={{ width: 200 }} /><col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} />
         {/* Demand Info (6): NLC Value Mix, GRN/kg, Prev GRN/unit, GRN/unit, GRN Diff, Adjusted GRN */}
         <col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 130 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 120 }} />
         {/* Benchmark Info (12) */}
@@ -1525,11 +1538,20 @@ function ScrollTable({
       </colgroup>
       <thead>
         <tr className="h-6">
-          <th colSpan={6} className={`${STICKY_GROUP} h-6 border-b bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
+          <th colSpan={1} className={`${STICKY_GROUP} h-6 border-b bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information</th>
+          <th colSpan={3} className={`${STICKY_GROUP} h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information (cont.)</th>
+          <th colSpan={1} className={`${STICKY_GROUP} h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
+          <th colSpan={6} className={`${STICKY_GROUP} h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
           <th colSpan={12} className={`${STICKY_GROUP} h-6 border-b border-l bg-muted px-2 py-0 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Benchmark Information</th>
         </tr>
 
         <tr className={`${COL_HEAD_H} border-b`}>
+          {/* Basic Info (scrollable) */}
+          <th className={`${STICKY_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>NC SKU Name</th>
+          <th className={`${STICKY_COL} border-l bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Special Tags</th>
+          <th className={`${STICKY_COL} bg-card px-2 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Subcategory</th>
+          <th className={`${STICKY_COL} bg-card px-2 text-right align-middle text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Conv. Factor</th>
+          <th className={`${STICKY_COL} border-l bg-card px-2 align-middle`}><SortHeader align="right" label="Demand Units" active={sortKey==="demandUnits"} dir={sortDir} onClick={() => toggleSort("demandUnits")} /></th>
           {/* Demand Info */}
           <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="NLC Value Mix" active={sortKey==="nlcValueMix"} dir={sortDir} onClick={() => toggleSort("nlcValueMix")} /></th>
           <th className={`${STICKY_COL} bg-card px-2 align-middle`}><SortHeader align="right" label="GRN ₹/kg" active={sortKey==="grnPricePerKg"} dir={sortDir} onClick={() => toggleSort("grnPricePerKg")} /></th>
@@ -1553,6 +1575,9 @@ function ScrollTable({
         </tr>
         {/* Averages */}
         <tr className={`${SUB_HEAD_H} border-b text-[11px] font-medium`}>
+          <td colSpan={1} className={`${STICKY_AVG} bg-accent px-2 text-muted-foreground`}>Averages →</td>
+          <td colSpan={3} className={`${STICKY_AVG} border-l bg-accent px-2 text-muted-foreground`}>Averages →</td>
+          <td className={`${STICKY_AVG} border-l bg-accent px-2 text-right tabular-nums`}>{averages.demandUnits !== null ? Math.round(averages.demandUnits).toLocaleString() : "—"}</td>
           <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{averages.nlcValueMix !== null ? `₹${Math.round(averages.nlcValueMix).toLocaleString()}` : "—"}</td>
           <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.grnPricePerKg)}</td>
           <td className={`${STICKY_AVG} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.prevDayGrnPerUnit)}</td>
@@ -1583,6 +1608,19 @@ function ScrollTable({
             (!row.negotiatedLocked || row.negotiatedPp === row.lastLockedNegotiated);
           return (
             <tr key={row.fsnId} className={`${ROW_H} border-b last:border-b-0 hover:bg-muted/40`}>
+              {/* Basic Info (scrollable) */}
+              <td className="max-w-[200px] truncate px-2 text-[11px]">{row.ncSkuName || "—"}</td>
+              <td className="border-l px-2">
+                {row.specialTag && (
+                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                    row.specialTag === "Summer" ? "bg-warn-bg text-warn-foreground" :
+                    row.specialTag === "Seasonal" ? "bg-accent text-accent-foreground" : "bg-muted text-foreground"
+                  }`}>{row.specialTag}</span>
+                )}
+              </td>
+              <td className="px-2 text-muted-foreground">{row.subcategory}</td>
+              <td className="px-2 text-right tabular-nums">{row.conversionFactor.toFixed(2)}</td>
+              <td className="border-l px-2 text-right tabular-nums">{row.demandUnits.toLocaleString()}</td>
               {/* Demand Info */}
               <td className="px-2 text-right tabular-nums">₹{Math.round(calc.nlcValueMix).toLocaleString()}</td>
 

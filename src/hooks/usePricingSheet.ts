@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
 
-export function usePricingSheet(params: { city?: string; deliveryDate?: string }) {
-  const { city, deliveryDate } = params;
+export function usePricingSheet(params: { city?: string; deliveryDate?: string; autoFetch?: boolean }) {
+  const { city, deliveryDate, autoFetch = true } = params;
   const [rows, setRows] = useState<PricingSheetRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,13 +76,17 @@ export function usePricingSheet(params: { city?: string; deliveryDate?: string }
 
 
   useEffect(() => {
+    if (!autoFetch) {
+      setRows([]);
+      return;
+    }
     let cancelled = false;
     (async () => {
       if (cancelled) return;
       await fetchRows();
     })();
     return () => { cancelled = true; };
-  }, [fetchRows]);
+  }, [fetchRows, autoFetch]);
 
   // Optimistic patch of a single row (by id or fsn_id+weight_unit) and persist to Supabase.
   const updateRow = useCallback(
