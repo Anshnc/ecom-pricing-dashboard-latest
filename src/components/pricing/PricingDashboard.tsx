@@ -146,8 +146,15 @@ const VIOLATIONS: { key: string; label: string }[] = [
   { key: "blank_bk", label: "Blank Blinkit SP" },
   { key: "missing_grn", label: "Missing GRN" },
   { key: "has_suggested", label: "Has Suggested PP" },
-  { key: "high_deflection", label: "High Deflection (>8%)" },
+  { key: "high_deflection", label: "Deflection out of range (±8%)" },
 ];
+
+const DEFLECTION_MIN = -8;
+const DEFLECTION_MAX = 8;
+
+function isDeflectionOutOfRange(pct: number, min = DEFLECTION_MIN, max = DEFLECTION_MAX) {
+  return pct < min || pct > max;
+}
 
 const fmt = (n: number | null | undefined, d = 2) =>
   n === null || n === undefined || Number.isNaN(n) ? "—" : `₹${n.toFixed(d)}`;
@@ -496,7 +503,7 @@ export function PricingDashboard() {
       if (fs.has("blank_bk") && row.blinkitSp === null) return true;
       if (fs.has("missing_grn") && row.grnPricePerKg === null) return true;
       if (fs.has("has_suggested") && row.suggestedPp !== null) return true;
-      if (fs.has("high_deflection") && row.priceDeflectionPct > 8) return true;
+      if (fs.has("high_deflection") && isDeflectionOutOfRange(row.priceDeflectionPct)) return true;
       return false;
     });
   }, [enriched, search, violationFilters, subcategoryFilters, resolveSubcategory]);
@@ -1494,7 +1501,7 @@ function FrozenTable({
         {rows.map(({ row, calc }) => {
           const negPi = calc.piPct !== null && calc.piPct < 0;
           const negGm = calc.gm !== null && calc.gm < 0;
-          const highDefl = row.priceDeflectionPct > 8;
+          const highDefl = isDeflectionOutOfRange(row.priceDeflectionPct);
           const rowCls = negPi || negGm
             ? "border-l-4 border-l-red-500 bg-red-50/50"
             : highDefl
@@ -1786,7 +1793,7 @@ function ScrollTable({
                 {calc.gm !== null ? fmt(calc.gm) : "—"}
               </td>
               {/* Deflection % */}
-              <td className={`px-2 text-right tabular-nums ${row.priceDeflectionPct > 8 ? "bg-warn-bg text-warn-foreground font-semibold" : ""}`}>
+              <td className={`px-2 text-right tabular-nums ${isDeflectionOutOfRange(row.priceDeflectionPct) ? "bg-warn-bg text-warn-foreground font-semibold" : ""}`}>
                 {row.priceDeflectionPct}%
 
               </td>
@@ -2676,7 +2683,7 @@ function PriceApprovalTab({
     const negPi = pi !== null && pi < 0;
     const negGm = gm !== null && gm < 0;
     const piOutOfRange = pi !== null && (pi < piMin || pi > piMax);
-    const highDefl = defl > deflLimit;
+    const highDefl = isDeflectionOutOfRange(defl, -deflLimit, deflLimit);
     return { negPi, negGm, piOutOfRange, highDefl };
   };
 
@@ -3083,7 +3090,7 @@ function ViolationFilterDropdown({
     { key: "neg_pi", label: "Negative PI", count: counts.negPi },
     { key: "pi_range", label: "PI Out of Range", count: counts.piOut },
     { key: "neg_gm", label: "GM Negative", count: counts.negGm },
-    { key: "defl", label: `Deflection > ${deflLimit}%`, count: counts.highDefl },
+    { key: "defl", label: `Deflection outside ±${deflLimit}%`, count: counts.highDefl },
   ];
   const toggle = (k: string) => {
     setActive((s) => {
@@ -3312,7 +3319,7 @@ function ApprovalScrollTable({
               <td className="px-2 text-right tabular-nums">
                 {calc.gm !== null ? fmt(calc.gm) : "—"}
               </td>
-              <td className="px-2 text-right tabular-nums">
+              <td className={`px-2 text-right tabular-nums ${isDeflectionOutOfRange(row.priceDeflectionPct) ? "bg-warn-bg text-warn-foreground font-semibold" : ""}`}>
                 {row.priceDeflectionPct}%
               </td>
             </tr>
