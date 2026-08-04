@@ -32,6 +32,7 @@ import {
   Maximize2,
   Minimize2,
 } from "lucide-react";
+import { RaasCheckTab } from "@/components/pricing/RaasCheckTab";
 
 const TABLE_ZOOM_MIN = 50;
 const TABLE_ZOOM_MAX = 100;
@@ -137,7 +138,7 @@ const SEED: SkuRow[] = [
 ];
 
 const CITIES = ["Bengaluru", "Chennai", "Coimbatore", "Hyderabad", "Mumbai", "Nashik", "Trichy"];
-const TABS = ["Price Upload", "Price Approval", "Demand Upload", "SKU Configuration", "Guardrails"];
+const TABS = ["Price Upload", "Price Approval", "Demand Upload", "SKU Configuration", "Guardrails", "RAAS Check"];
 
 const VIOLATIONS: { key: string; label: string }[] = [
   { key: "all", label: "All SKUs" },
@@ -233,7 +234,8 @@ function deriveRow(r: SkuRow, totalDemand: number) {
       : null;
   const valueMix = r.blinkitSp !== null ? r.blinkitSp * r.demandUnits : null;
   const nlcValueMix = nlc * r.demandUnits;
-  return { grnPerUnit, prevDayGrnPerUnit: r.prevDayGrnPerUnit ?? null, grnDiff, nlc, piPct, gm, totalDemandPct, impactPpDiff, impactGm, valueMix, nlcValueMix };
+  const grnMarkup = grnPerUnit !== null ? r.quotedPp - grnPerUnit : null;
+  return { grnPerUnit, prevDayGrnPerUnit: r.prevDayGrnPerUnit ?? null, grnDiff, nlc, piPct, gm, totalDemandPct, impactPpDiff, impactGm, valueMix, nlcValueMix, grnMarkup };
 }
 
 type Enriched = { row: SkuRow; calc: ReturnType<typeof deriveRow> };
@@ -295,6 +297,7 @@ function computePriceUploadAverages(enriched: Enriched[]) {
     quotedPp: weightedByDemandPct(enriched, (e) => e.row.quotedPp),
     negotiatedPp: weightedByDemandPct(enriched, (e) => e.row.negotiatedPp),
     suggestedPp: weightedByDemandPct(enriched, (e) => e.row.suggestedPp),
+    grnMarkup: weightedByDemandPct(enriched, (e) => e.calc.grnMarkup),
   };
 }
 
@@ -578,6 +581,7 @@ export function PricingDashboard() {
         case "blinkitSp": return e.row.blinkitSp ?? -Infinity;
         case "adjustedGrn": return e.row.adjustedGrn ?? 0;
         case "quotedPp": return e.row.quotedPp;
+        case "grnMarkup": return e.calc.grnMarkup ?? -Infinity;
         case "negotiatedPp": return e.row.negotiatedPp;
         case "nlc": return e.calc.nlc;
         case "piPct": return e.calc.piPct ?? -Infinity;
@@ -862,7 +866,7 @@ export function PricingDashboard() {
             <span>/</span>
             <span className="text-foreground">Ecom Pricing</span>
             <span>/</span>
-            <span>Price Upload</span>
+            <span>{TABS[tab] ?? "Price Upload"}</span>
           </div>
           <div className="flex items-center gap-3">
             {tab === 0 && sheetCreated && (
@@ -956,7 +960,7 @@ export function PricingDashboard() {
             <div className="flex flex-wrap items-end gap-2">
               <button
                 onClick={() => {
-                  const header = "FSN ID,Weight Unit,NC SKU ID,NC SKU Name,Subcategory,Conv. Factor,Demand Units,Total Demand %,GRN ₹/kg,GRN ₹/unit,Prev Day GRN ₹/unit,GRN Diff,Blinkit SP,Adjusted GRN,Quoted PP,Negotiated PP,NLC,PI %,GM,Deflection %,Impact PP Diff,Impact GM,BK Value Mix\n";
+                  const header = "FSN ID,Weight Unit,NC SKU ID,NC SKU Name,Subcategory,Conv. Factor,Demand Units,Total Demand %,GRN ₹/kg,GRN ₹/unit,Prev Day GRN ₹/unit,GRN Diff,Blinkit SP,Adjusted GRN,Quoted PP,GRN Markup,Negotiated PP,NLC,PI %,GM,Deflection %,Impact PP Diff,Impact GM,BK Value Mix\n";
                   const esc = (v: unknown) => {
                     const s = v === null || v === undefined ? "" : String(v);
                     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -965,7 +969,8 @@ export function PricingDashboard() {
                     [row.fsnId, row.weightUnit, row.ncSkuId, row.ncSkuName, row.subcategory, row.conversionFactor,
                      row.demandUnits, calc.totalDemandPct?.toFixed(3), row.grnPricePerKg ?? "",
                      calc.grnPerUnit?.toFixed(2) ?? "", row.prevDayGrnPerUnit ?? "", calc.grnDiff?.toFixed(2) ?? "",
-                     row.blinkitSp ?? "", row.adjustedGrn ?? 0, row.quotedPp, row.negotiatedPp,
+                     row.blinkitSp ?? "", row.adjustedGrn ?? 0, row.quotedPp, calc.grnMarkup?.toFixed(2) ?? "",
+                     row.negotiatedPp,
                      calc.nlc.toFixed(2), calc.piPct?.toFixed(2) ?? "", calc.gm?.toFixed(2) ?? "",
                      row.priceDeflectionPct, calc.impactPpDiff?.toFixed(2) ?? "",
                      calc.impactGm?.toFixed(2) ?? "", calc.valueMix?.toFixed(0) ?? ""].map(esc).join(",")
@@ -1252,6 +1257,9 @@ export function PricingDashboard() {
           {tab === 2 && <UploadPanel kind="demand" />}
           {tab === 3 && <SkuConfigTab />}
           {tab === 4 && <GuardRailsTab />}
+          <div className={tab === 5 ? "block" : "hidden"} aria-hidden={tab !== 5}>
+            <RaasCheckTab parentDate={deliveryDate} parentCity={city} />
+          </div>
         </main>
       </div>
 
@@ -1703,14 +1711,14 @@ function ScrollTable({
   submitted: boolean;
 }) {
   return (
-    <table className="min-w-[1850px] border-collapse text-[12px] [&_th]:box-border [&_td]:box-border [&_th]:overflow-hidden [&_td]:overflow-hidden [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
+    <table className="min-w-[1960px] border-collapse text-[12px] [&_th]:box-border [&_td]:box-border [&_th]:overflow-hidden [&_td]:overflow-hidden [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
       <colgroup>
         {/* Basic Info (scrollable): NC SKU Name, Special Tags, Subcategory, Conv. Factor, Demand Units */}
         <col style={{ width: 200 }} /><col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} />
         {/* Demand Info (6): NLC Value Mix, GRN/kg, Prev GRN/unit, GRN/unit, GRN Diff, Adjusted GRN */}
         <col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 130 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 120 }} />
-        {/* Benchmark Info (12) */}
-        <col style={{ width: 90 }} /><col style={{ width: 80 }} /><col style={{ width: 120 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} />
+        {/* Benchmark Info (13) */}
+        <col style={{ width: 90 }} /><col style={{ width: 80 }} /><col style={{ width: 120 }} /><col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} />
       </colgroup>
       <thead>
         <tr className={GROUP_HEAD_H}>
@@ -1718,7 +1726,7 @@ function ScrollTable({
           <th colSpan={3} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information (cont.)</th>
           <th colSpan={1} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
           <th colSpan={6} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
-          <th colSpan={12} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Benchmark Information</th>
+          <th colSpan={13} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Benchmark Information</th>
         </tr>
 
         <tr className={`${COL_HEAD_H} border-b`}>
@@ -1739,6 +1747,7 @@ function ScrollTable({
           <th className={`${STICKY_COL} ${HEAD_TH} border-l bg-card px-2`}><SortHeader align="right" label="Blinkit SP" active={sortKey==="blinkitSp"} dir={sortDir} onClick={() => toggleSort("blinkitSp")} /></th>
           <th title="WSP Trend" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-center text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>WSP Trend</th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Quoted PP" active={sortKey==="quotedPp"} dir={sortDir} onClick={() => toggleSort("quotedPp")} /></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Quoted PP − GRN ₹/unit"><SortHeader align="right" label="GRN Markup" active={sortKey==="grnMarkup"} dir={sortDir} onClick={() => toggleSort("grnMarkup")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Negotiated PP" active={sortKey==="negotiatedPp"} dir={sortDir} onClick={() => toggleSort("negotiatedPp")} /></th>
           <th title="Suggested PP" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Suggested PP</th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="NLC" active={sortKey==="nlc"} dir={sortDir} onClick={() => toggleSort("nlc")} /></th>
@@ -1764,6 +1773,7 @@ function ScrollTable({
           <td className={`${STICKY_AVG} ${AVG_TD} border-l bg-accent px-2 text-right tabular-nums`}>{fmt(averages.blinkitSp)}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-center text-muted-foreground`}>—</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.quotedPp)}</td>
+          <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.grnMarkup)}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.negotiatedPp)}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.suggestedPp)}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.nlc)}</td>
@@ -1921,6 +1931,10 @@ function ScrollTable({
                     }
                   }}
                 />
+              </td>
+              {/* GRN Markup = Quoted PP − GRN ₹/unit */}
+              <td className="px-2 text-right tabular-nums">
+                {calc.grnMarkup !== null ? fmt(calc.grnMarkup) : "—"}
               </td>
               {/* Negotiated PP */}
               <td className="px-2">
