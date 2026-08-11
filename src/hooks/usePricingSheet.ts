@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
+import { enrichRowsWithMysqlWeightUnits } from "@/lib/fsnWeightUnit";
 
 export function usePricingSheet(params: { city?: string; deliveryDate?: string; autoFetch?: boolean }) {
   const { city, deliveryDate, autoFetch = true } = params;
@@ -70,6 +71,11 @@ export function usePricingSheet(params: { city?: string; deliveryDate?: string; 
       }
     }
 
+    // Weight Unit display source of truth: vormir/asgard MySQL (fallback: pricing_sheet).
+    if (city) {
+      result = (await enrichRowsWithMysqlWeightUnits(result, city)) as PricingSheetRow[];
+    }
+
     setRows(result);
     setLoading(false);
   }, [city, deliveryDate]);
@@ -89,16 +95,20 @@ export function usePricingSheet(params: { city?: string; deliveryDate?: string; 
   }, [fetchRows, autoFetch]);
 
   // Optimistic patch of a single row (by id or fsn_id+weight_unit) and persist to Supabase.
+  // Prefer matching on the original Supabase weight_unit (`weight_unit_db`) when MySQL enrichment changed the display value.
   const updateRow = useCallback(
     async (
       match: { id?: string; fsn_id?: string; weight_unit?: string | null },
       patch: Partial<PricingSheetRow>,
     ) => {
+      const rowMatchKey = (r: PricingSheetRow) => r.weight_unit_db ?? r.weight_unit ?? null;
       setRows((rs) =>
         rs.map((r) => {
           const hit =
             (match.id && r.id === match.id) ||
-            (match.fsn_id && r.fsn_id === match.fsn_id && (match.weight_unit ?? null) === (r.weight_unit ?? null));
+            (match.fsn_id &&
+              r.fsn_id === match.fsn_id &&
+              (match.weight_unit ?? null) === rowMatchKey(r));
           return hit ? { ...r, ...patch } : r;
         }),
       );
@@ -110,12 +120,33 @@ export function usePricingSheet(params: { city?: string; deliveryDate?: string; 
         if (city) q = q.eq("city", city);
         if (match.weight_unit !== undefined) q = q.eq("weight_unit", match.weight_unit as string);
       }
-      const { error } = await q;
+      const { data, error } = await q.select("*").maybeSingle();
       if (error) {
         setError(error.message);
         // No rollback — caller can call fetchRows() to reconcile.
         throw error;
       }
+      const updated = data as PricingSheetRow | null;
+      if (updated) {
+        setRows((rs) =>
+          rs.map((r) => {
+            const hit =
+              (match.id && r.id === match.id) ||
+              (match.fsn_id &&
+                r.fsn_id === match.fsn_id &&
+                (match.weight_unit ?? null) === rowMatchKey(r));
+            // Keep MySQL display weight_unit / weight_unit_db when merging RETURNING row.
+            return hit
+              ? {
+                  ...updated,
+                  weight_unit: r.weight_unit,
+                  weight_unit_db: r.weight_unit_db ?? r.weight_unit,
+                }
+              : r;
+          }),
+        );
+      }
+      return updated;
     },
     [city, deliveryDate],
   );

@@ -17,6 +17,8 @@ export type PricingSheetRow = {
   city_id: number | null;
   fsn_id: string | null;
   weight_unit: string | null;
+  /** Original Supabase weight_unit before MySQL enrichment (client-only, not a DB column). */
+  weight_unit_db?: string | null;
   sku_id: string | null;
   sku_name: string | null;
   cf: number | null;
@@ -56,7 +58,10 @@ export type PricingSheetRow = {
 
   // derived
   nlc: number | null;
+  nlc_negotiated?: number | null;
   pi_pct: number | null;
+  pi_pct_quoted?: number | null;
+  pi_pct_negotiated?: number | null;
   gm: number | null;
   deflection_pct: number | null;
   impact_pp_diff: number | null;
