@@ -11,7 +11,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { fetchPriceSheetDetails, fetchPriceSheetHeader, mergeHeaderAndDetails } from "@/lib/priceSheetDb";
 import { downloadCSV, parseCSVMatrix, toCSV } from "@/lib/csv";
 import { enrichRowsWithMysqlWeightUnits, loadFsnWeightUnitLookup } from "@/lib/fsnWeightUnit";
 
@@ -98,16 +98,11 @@ function fsnKey(fsn: string) {
 }
 
 async function fetchToolSkusFromDb(city: string, deliveryDate: string): Promise<ToolSku[]> {
-  const { data, error } = await supabase
-    .from("pricing_sheet")
-    .select("fsn_id,weight_unit,negotiated_pp,quoted_pp")
-    .eq("city", city)
-    .eq("delivery_date", deliveryDate)
-    .order("fsn_id", { ascending: true, nullsFirst: false })
-    .order("weight_unit", { ascending: true, nullsFirst: false })
-    .limit(5000);
-  if (error) throw new Error(error.message);
-  const enriched = await enrichRowsWithMysqlWeightUnits(data ?? [], city);
+  const header = await fetchPriceSheetHeader(city, deliveryDate);
+  if (!header) return [];
+  const details = await fetchPriceSheetDetails(header.price_sheet_id);
+  const rows = mergeHeaderAndDetails(header, details);
+  const enriched = await enrichRowsWithMysqlWeightUnits(rows, city);
   return mapToolSkus(enriched);
 }
 

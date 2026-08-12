@@ -1,3 +1,4 @@
+import { fetchPriceSheetHeader, fetchPriceSheetDetails, mergeHeaderAndDetails } from "@/lib/priceSheetDb";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
 
 /**
@@ -116,12 +117,13 @@ const CASCADE_ONLY_COLUMNS: ReadonlySet<AuditValueColumn> = new Set([
   "bk_value_mix",
 ]);
 
-/** pricing_sheet columns + revision_id / revision_type (no extra metadata columns). */
+/** Audit row — revision_id is the primary key; sparse value columns only. */
 export type PricingSheetAuditRow = {
-  id: string;
   revision_id: string;
   /** 0 = current lock, 1 = previous/historical */
   revision_type: 0 | 1;
+  price_sheet_details_id: string;
+  price_sheet_id: string;
   delivery_date?: string | null;
   city?: string | null;
   city_id?: number | null;
@@ -417,16 +419,14 @@ export async function fetchPricingSheetRow(args: {
   fsnId: string;
   weightUnit: string;
 }): Promise<PricingSheetRow | null> {
-  const { data, error } = await supabase
-    .from("pricing_sheet")
-    .select("*")
-    .eq("city", args.city)
-    .eq("delivery_date", args.deliveryDate)
-    .eq("fsn_id", args.fsnId)
-    .eq("weight_unit", args.weightUnit)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as PricingSheetRow) ?? null;
+  const header = await fetchPriceSheetHeader(args.city, args.deliveryDate);
+  if (!header) return null;
+  const details = await fetchPriceSheetDetails(header.price_sheet_id);
+  const row = details.find(
+    (d) => d.fsn_id === args.fsnId && d.weight_unit === args.weightUnit,
+  );
+  if (!row) return null;
+  return mergeHeaderAndDetails(header, [row])[0];
 }
 
 /**
@@ -437,6 +437,8 @@ export async function fetchPricingSheetRow(args: {
  * 3. Keep at most 3 historical (type=1) rows — drop oldest.
  */
 export async function recordLockAudit(args: {
+  priceSheetDetailsId: string;
+  priceSheetId: string;
   city: string;
   deliveryDate: string;
   fsnId: string;
@@ -455,14 +457,9 @@ export async function recordLockAudit(args: {
     return null;
   }
 
-  const match = {
-    city: args.city,
-    delivery_date: args.deliveryDate,
-    fsn_id: args.fsnId,
-    weight_unit: args.weightUnit,
-  };
-
   const identity = {
+    price_sheet_details_id: args.priceSheetDetailsId,
+    price_sheet_id: args.priceSheetId,
     delivery_date: args.deliveryDate,
     city: args.city,
     city_id: args.cityId ?? null,
@@ -486,10 +483,7 @@ export async function recordLockAudit(args: {
   await supabase
     .from("pricing_sheet_audit")
     .delete()
-    .eq("city", match.city)
-    .eq("delivery_date", match.delivery_date)
-    .eq("fsn_id", match.fsn_id)
-    .eq("weight_unit", match.weight_unit)
+    .eq("price_sheet_details_id", args.priceSheetDetailsId)
     .eq("revision_type", 0);
 
   let currentRow: PricingSheetAuditRow | null = null;
@@ -511,18 +505,15 @@ export async function recordLockAudit(args: {
   // 3) Cap historical rows at 3 (newest kept).
   const { data: historical, error: histListErr } = await supabase
     .from("pricing_sheet_audit")
-    .select("id, created_at")
-    .eq("city", match.city)
-    .eq("delivery_date", match.delivery_date)
-    .eq("fsn_id", match.fsn_id)
-    .eq("weight_unit", match.weight_unit)
+    .select("revision_id, created_at")
+    .eq("price_sheet_details_id", args.priceSheetDetailsId)
     .eq("revision_type", 1)
     .order("created_at", { ascending: false });
 
   if (!histListErr && historical && historical.length > 3) {
-    const dropIds = historical.slice(3).map((r) => r.id);
+    const dropIds = historical.slice(3).map((r) => r.revision_id);
     if (dropIds.length) {
-      await supabase.from("pricing_sheet_audit").delete().in("id", dropIds);
+      await supabase.from("pricing_sheet_audit").delete().in("revision_id", dropIds);
     }
   }
 
@@ -534,20 +525,14 @@ export async function recordLockAudit(args: {
  * These hold the BEFORE values of each change — never the live current row.
  */
 export async function fetchRowAuditHistory(args: {
-  city: string;
-  deliveryDate: string;
-  fsnId: string;
-  weightUnit: string;
+  priceSheetDetailsId: string;
   limit?: number;
 }): Promise<PricingSheetAuditRow[]> {
   const limit = args.limit ?? 3;
   const { data, error } = await supabase
     .from("pricing_sheet_audit")
     .select("*")
-    .eq("city", args.city)
-    .eq("delivery_date", args.deliveryDate)
-    .eq("fsn_id", args.fsnId)
-    .eq("weight_unit", args.weightUnit)
+    .eq("price_sheet_details_id", args.priceSheetDetailsId)
     .eq("revision_type", 1)
     .order("created_at", { ascending: false })
     .limit(limit);

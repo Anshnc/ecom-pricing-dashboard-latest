@@ -11,6 +11,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
+import { priceSheetHeaderExists } from "@/lib/priceSheetDb";
 import { usePricingSheet } from "@/hooks/usePricingSheet";
 import { useSubcategories } from "@/hooks/useSubcategories";
 import { useGuardrails } from "@/hooks/useGuardrails";
@@ -46,7 +47,8 @@ import {
   Calculator,
   ChevronLeft,
 } from "lucide-react";
-import { loadPricingSheetDemand } from "@/lib/pricingSheetCache";
+import { loadPricingSheetDemand, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
+import { upsertFsnCostComponentsFromCsv, fetchFsnCostComponentsByFsns, parseFsnCostCsvRows } from "@/lib/skuCostComponents";
 import { RaasCheckTab } from "@/components/pricing/RaasCheckTab";
 import { RowAuditExpandButton } from "@/components/pricing/RowAuditHistoryButton";
 import {
@@ -422,7 +424,7 @@ export function PricingDashboard() {
   );
 
   // Live-load pricing_sheet rows when the user opens the sheet (Fetch/Create).
-  const { rows: dbRows, loading: sheetFetchLoading, updateRow: dbUpdateRow, submitSheet: dbSubmit, refetch: dbRefetch } =
+  const { rows: dbRows, loading: sheetFetchLoading, priceSheetId, updateRow: dbUpdateRow, submitSheet: dbSubmit, refetch: dbRefetch } =
     usePricingSheet({ city, deliveryDate, autoFetch: false });
   const { subcategoryNames, resolveSubcategory } = useSubcategories();
   const [sheetBusy, setSheetBusy] = useState(false);
@@ -431,24 +433,16 @@ export function PricingDashboard() {
   // Lightweight existence check for Create vs Fetch button (no full sheet load).
   const [sheetExists, setSheetExists] = useState<boolean | null>(null);
   const checkSheetExists = useCallback(async () => {
-    const { count, error } = await supabase
-      .from("pricing_sheet")
-      .select("id", { count: "exact", head: true })
-      .eq("city", city)
-      .eq("delivery_date", deliveryDate);
-    setSheetExists(!error && (count ?? 0) > 0);
+    const exists = await priceSheetHeaderExists(city, deliveryDate);
+    setSheetExists(exists);
   }, [city, deliveryDate]);
 
   useEffect(() => {
     let cancelled = false;
     setSheetExists(null);
     (async () => {
-      const { count, error } = await supabase
-        .from("pricing_sheet")
-        .select("id", { count: "exact", head: true })
-        .eq("city", city)
-        .eq("delivery_date", deliveryDate);
-      if (!cancelled) setSheetExists(!error && (count ?? 0) > 0);
+      const exists = await priceSheetHeaderExists(city, deliveryDate);
+      if (!cancelled) setSheetExists(exists);
     })();
     return () => { cancelled = true; };
   }, [city, deliveryDate]);
@@ -546,11 +540,13 @@ export function PricingDashboard() {
       if (auditHistoryByKey[key]) return;
       setAuditLoadingKey(key);
       try {
+        const detailId = row?.rowId;
+        if (!detailId) {
+          setAuditHistoryByKey((prev) => ({ ...prev, [key]: [] }));
+          return;
+        }
         const entries = await fetchRowAuditHistory({
-          city,
-          deliveryDate,
-          fsnId,
-          weightUnit: matchWu,
+          priceSheetDetailsId: detailId,
           limit: 3,
         });
         setAuditHistoryByKey((prev) => ({ ...prev, [key]: entries }));
@@ -806,7 +802,16 @@ export function PricingDashboard() {
             });
             if (Object.keys(previous).length === 0 && Object.keys(current).length === 0) return;
 
+            const detailId =
+              afterDb?.id ??
+              beforeDbSnapshot?.id ??
+              auditAfter.rowId ??
+              null;
+            if (!detailId || !priceSheetId) return;
+
             await recordLockAudit({
+              priceSheetDetailsId: detailId,
+              priceSheetId,
               city,
               deliveryDate,
               fsnId,
@@ -830,7 +835,7 @@ export function PricingDashboard() {
               return next;
             });
             if (expandedAuditKey === aKey) {
-              fetchRowAuditHistory({ city, deliveryDate, fsnId, weightUnit: matchWu, limit: 3 })
+              fetchRowAuditHistory({ priceSheetDetailsId: detailId, limit: 3 })
                 .then((entries) => setAuditHistoryByKey((p) => ({ ...p, [aKey]: entries })))
                 .catch(() => {});
             }
@@ -2038,7 +2043,7 @@ function FrozenTable({
                 </tr>
               )}
               {expanded && !loading && history.map((entry, idx) => (
-                <tr key={entry.id} className={`${ROW_H} border-b bg-muted/25 text-muted-foreground`}>
+                <tr key={entry.revision_id} className={`${ROW_H} border-b bg-muted/25 text-muted-foreground`}>
                   <td className="truncate px-2 pl-7 font-mono text-[10px]">
                     prev {idx + 1}
                   </td>
@@ -2419,7 +2424,7 @@ function ScrollTable({
               </tr>
             )}
             {expanded && !loading && history.map((entry) => (
-              <tr key={entry.id} className={`${ROW_H} border-b bg-muted/25 text-[11px] text-muted-foreground`}>
+              <tr key={entry.revision_id} className={`${ROW_H} border-b bg-muted/25 text-[11px] text-muted-foreground`}>
                 <td className="max-w-[200px] truncate px-2">{formatSparseAuditCell(entry, "sku_name")}</td>
                 <td className="border-l px-2">{formatSparseAuditCell(entry, "bucket")}</td>
                 <td className="px-2">{formatSparseAuditCell(entry, "subcategory")}</td>
@@ -2501,7 +2506,7 @@ const QUOTED_PP_FORMULA_OPTIONS: {
   {
     id: "margin_vs_grn",
     label: "Set a margin/loss vs GRN (per kg)",
-    inputLabel: "Margin per kg (+/−)",
+    inputLabel: "Margin per kg X (+ extra / − loss)",
     requirePositive: false,
   },
 ];
@@ -2527,7 +2532,8 @@ function computeQuotedPpFromFormula(
       if (row.grnPricePerKg === null) {
         return { error: "GRN/kg is unavailable for this row" };
       }
-      return { value: (row.grnPricePerKg - x) * row.conversionFactor };
+      // Quoted PP = (GRN/kg + X) * CF. X is signed: 2 adds ₹2/kg, -2 subtracts ₹2/kg.
+      return { value: (row.grnPricePerKg + x) * row.conversionFactor };
   }
 }
 
@@ -2761,6 +2767,7 @@ function QuotedPpFormulaButton({
             <span className="text-[11px] text-muted-foreground">{selected.inputLabel}</span>
             <input
               type="number"
+              step="any"
               autoFocus
               value={draft}
               onChange={(e) => handleDraftChange(e.target.value)}
@@ -3090,17 +3097,26 @@ function UploadPanel({ kind }: { kind: "demand" | "sku" }) {
 
         const chunk = 500;
         let inserted = 0;
-        for (let i = 0; i < payload.length; i += chunk) {
-          const slice = payload.slice(i, i + chunk);
-          const { error, count } = await supabase
-            .from("pricing_sheet")
-            .upsert(slice, { onConflict: "delivery_date,city,sku_id,weight_unit", count: "exact" });
-          if (error) throw error;
-          inserted += count ?? slice.length;
+        const bySheet = new Map<string, Partial<PricingSheetRow>[]>();
+        for (const p of payload) {
+          const key = `${p.delivery_date}||${p.city}`;
+          const list = bySheet.get(key) ?? [];
+          list.push(p);
+          bySheet.set(key, list);
+        }
+        for (const [key, rows] of bySheet) {
+          const [dd, c] = key.split("||");
+          const detailRows = rows.map(({ delivery_date: _d, city: _c, city_id: _ci, ...rest }) => rest);
+          for (let i = 0; i < detailRows.length; i += chunk) {
+            const slice = detailRows.slice(i, i + chunk);
+            inserted += await upsertDemandUploadRows(c, dd, slice);
+          }
         }
         toast.success(`Demand uploaded — ${inserted} rows`);
       } else {
-        toast.success("SKU configuration uploaded successfully");
+        const text = await file.text();
+        const count = await upsertFsnCostComponentsFromCsv(text, city || undefined);
+        toast.success(`FSN cost components saved — ${count} rows`);
       }
       setFile(null);
     } catch (e) {
@@ -3340,10 +3356,35 @@ function SkuConfigTab() {
 
   const canFetch = selectedSkus.length > 0;
 
-  const onFetch = () => {
+  const onFetch = async () => {
     const rows = store.filter((o) => selectedSkus.includes(o.id));
-    setFetched(rows);
-    setPage(1);
+    const fsns = rows.map((r) => r.fsnId);
+    try {
+      const costs = await fetchFsnCostComponentsByFsns(fsns);
+      const byFsn = new Map<string, typeof costs>();
+      for (const c of costs) {
+        const list = byFsn.get(c.fsn_id) ?? [];
+        list.push(c);
+        byFsn.set(c.fsn_id, list);
+      }
+      const merged = rows.map((r) => {
+        const matches = byFsn.get(r.fsnId) ?? [];
+        const hit = matches[0];
+        if (!hit) return r;
+        return {
+          ...r,
+          weightUnit: hit.weight_unit,
+          pmCost: hit.pm_cost ?? 0,
+          fmlDump: hit.fml_dump ?? 0,
+          processingCost: hit.pc ?? 0,
+        };
+      });
+      setFetched(merged);
+      setPage(1);
+    } catch (e) {
+      const { toast } = await import("sonner");
+      toast.error(`Fetch failed: ${(e as Error).message}`);
+    }
   };
 
   const onChooseFile = () => fileRef.current?.click();
@@ -3362,8 +3403,7 @@ function SkuConfigTab() {
     if (!canUpload || !file) return;
     setUploading(true);
     const text = await file.text();
-    await new Promise((r) => setTimeout(r, 1500));
-    // Parse CSV and merge changes by SKU ID
+    const { toast } = await import("sonner");
     try {
       const lines = text.split(/\r?\n/).filter(Boolean);
       const header = lines[0].split(",").map((h) => h.trim());
@@ -3391,13 +3431,19 @@ function SkuConfigTab() {
       }
       setStore((prev) => prev.map((r) => (updates.has(r.id) ? { ...r, ...updates.get(r.id)! } : r)));
       setFetched((prev) => prev.map((r) => (updates.has(r.id) ? { ...r, ...updates.get(r.id)! } : r)));
-    } catch {
-      /* ignore parse errors in prototype */
+
+      const parsed = parseFsnCostCsvRows(text);
+      if (parsed.length === 0) {
+        throw new Error("CSV must include FSN ID and cost columns");
+      }
+      const count = await upsertFsnCostComponentsFromCsv(text, city || undefined);
+      toast.success(`Saved ${count} FSN cost component rows`);
+    } catch (e) {
+      toast.error(`Upload failed: ${(e as Error).message}`);
+    } finally {
+      setUploading(false);
+      setFile(null);
     }
-    setUploading(false);
-    const { toast } = await import("sonner");
-    toast.success("Changes have been saved");
-    setFile(null);
   };
 
   const canExport = fetched.length > 0;
