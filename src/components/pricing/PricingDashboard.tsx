@@ -47,7 +47,7 @@ import {
   Calculator,
   ChevronLeft,
 } from "lucide-react";
-import { loadPricingSheetDemand, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
+import { formatLocalISO, loadPricingSheetDemand, todayISO, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
 import { computeRowMetrics } from "@/lib/pricingMetrics";
 import { upsertFsnCostComponentsFromCsv, fetchFsnCostComponentsByFsns, parseFsnCostCsvRows } from "@/lib/skuCostComponents";
 import { RaasCheckTab } from "@/components/pricing/RaasCheckTab";
@@ -209,7 +209,7 @@ const num = (n: number | null | undefined, d = 1) =>
 const tomorrowISO = () => {
   const d = new Date();
   d.setDate(d.getDate() + 1);
-  return d.toISOString().slice(0, 10);
+  return formatLocalISO(d);
 };
 
 // Map a Supabase pricing_sheet row into the UI SkuRow shape.
@@ -241,10 +241,16 @@ function dbToSku(r: PricingSheetRow): SkuRow {
     quotedPp: r.quoted_pp ?? 0,
     quotedLocked: true,
     quotedTouched: false,
-    negotiatedPp: r.negotiated_pp ?? r.quoted_pp ?? 0,
+    negotiatedPp:
+      r.negotiated_pp != null && r.negotiated_pp !== 0
+        ? r.negotiated_pp
+        : (r.quoted_pp ?? 0),
     negotiatedLocked: true,
     negotiatedTouched: false,
-    lastLockedNegotiated: r.negotiated_pp ?? r.quoted_pp ?? 0,
+    lastLockedNegotiated:
+      r.negotiated_pp != null && r.negotiated_pp !== 0
+        ? r.negotiated_pp
+        : (r.quoted_pp ?? 0),
     suggestedPp: null,
     suggestionAcknowledgedAt: 0,
     packagingCost: r.pm_cost ?? 0,
@@ -2988,7 +2994,7 @@ const UPLOAD_CITIES = ["Bengaluru", "Chennai", "Coimbatore", "Hyderabad", "Mumba
 function tomorrowIso() {
   const d = new Date();
   d.setDate(d.getDate() + 1);
-  return d.toISOString().slice(0, 10);
+  return formatLocalISO(d);
 }
 
 function formatDDMMYYYY(iso: string) {
@@ -3741,7 +3747,7 @@ function PriceApprovalTab({
 
   const canFetch = !!date && !!city;
   const isTomorrow = date === tomorrowISO();
-  const isToday = date <= new Date().toISOString().slice(0, 10);
+  const isToday = date <= todayISO();
   // Pretend a sheet exists if tomorrow OR <= today (per spec). For demo, always exists.
   const sheetExists = canFetch && (isTomorrow || isToday);
 

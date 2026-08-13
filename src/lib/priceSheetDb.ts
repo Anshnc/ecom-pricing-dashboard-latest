@@ -38,6 +38,83 @@ function detailLineKey(fsnId: string | null | undefined, weightUnit: string | nu
   return `${fsnId ?? ""}||${weightUnit ?? ""}`;
 }
 
+/** Quoted NLC from a detail row (stored nlc or quoted_pp + cost components). */
+function quotedNlcFromDetailRow(d: Pick<PriceSheetDetailRow, "nlc" | "quoted_pp" | "pm_cost" | "fml_dump" | "pc">): number | null {
+  if (d.nlc != null && d.nlc !== 0) return d.nlc;
+  if (d.quoted_pp == null) return null;
+  return d.quoted_pp + (d.pm_cost ?? 0) + (d.fml_dump ?? 0) + (d.pc ?? 0);
+}
+
+export type PriorNlcLookup = {
+  byLineKey: Map<string, number>;
+  byFsn: Map<string, number>;
+};
+
+/**
+ * Most recent prior quoted NLC per (fsn + weight_unit) and per fsn (any weight unit).
+ * Scans all sheets before deliveryDate — not only calendar yesterday.
+ */
+export async function fetchPriorNlcLookup(city: string, deliveryDate: string): Promise<PriorNlcLookup> {
+  const empty = { byLineKey: new Map<string, number>(), byFsn: new Map<string, number>() };
+
+  const { data: headers, error: headerErr } = await supabase
+    .from("price_sheet")
+    .select("price_sheet_id, delivery_date")
+    .eq("city", city)
+    .lt("delivery_date", deliveryDate)
+    .order("delivery_date", { ascending: false });
+  if (headerErr || !headers?.length) return empty;
+
+  const dateBySheet = new Map(headers.map((h) => [h.price_sheet_id, h.delivery_date as string]));
+  const sheetIds = headers.map((h) => h.price_sheet_id);
+
+  const { data: details, error: detailErr } = await supabase
+    .from("price_sheet_details")
+    .select("fsn_id, weight_unit, quoted_pp, nlc, pm_cost, fml_dump, pc, price_sheet_id")
+    .in("price_sheet_id", sheetIds)
+    .limit(20000);
+  if (detailErr || !details?.length) return empty;
+
+  const sorted = [...details].sort((a, b) => {
+    const da = dateBySheet.get(a.price_sheet_id!) ?? "";
+    const db = dateBySheet.get(b.price_sheet_id!) ?? "";
+    return db.localeCompare(da);
+  });
+
+  const byLineKey = new Map<string, number>();
+  const byFsn = new Map<string, number>();
+
+  for (const d of sorted) {
+    const nlc = quotedNlcFromDetailRow(d as PriceSheetDetailRow);
+    if (nlc == null || nlc === 0) continue;
+    const fsn = String(d.fsn_id ?? "").trim();
+    if (!fsn) continue;
+    const lineKey = detailLineKey(fsn, d.weight_unit);
+    if (!byLineKey.has(lineKey)) byLineKey.set(lineKey, nlc);
+    if (!byFsn.has(fsn)) byFsn.set(fsn, nlc);
+  }
+
+  return { byLineKey, byFsn };
+}
+
+function resolvePrevDayNlc(
+  fsnId: string | null | undefined,
+  weightUnitDb: string | null | undefined,
+  weightUnit: string | null | undefined,
+  lookup: PriorNlcLookup,
+): number | null {
+  const fsn = String(fsnId ?? "").trim();
+  if (!fsn) return null;
+
+  for (const wu of [weightUnitDb, weightUnit]) {
+    if (!wu) continue;
+    const hit = lookup.byLineKey.get(detailLineKey(fsn, wu));
+    if (hit != null) return hit;
+  }
+
+  return lookup.byFsn.get(fsn) ?? null;
+}
+
 export function mergeHeaderAndDetails(
   header: PriceSheetHeader,
   details: PriceSheetDetailRow[],
@@ -116,42 +193,20 @@ async function fetchPreviousDayDetails(city: string, deliveryDate: string): Prom
   return (data ?? []) as PriceSheetDetailRow[];
 }
 
-/** Attach prior-day quoted NLC for client-side deflection when DB value is missing/stale. */
+/** Attach most recent prior quoted NLC for client-side deflection. */
 export async function enrichRowsWithPreviousDayNlc<T extends PricingSheetRow>(
   rows: T[],
   city: string,
   deliveryDate: string,
 ): Promise<(T & { prev_day_nlc?: number | null })[]> {
   if (rows.length === 0) return rows;
-  const prevDetails = await fetchPreviousDayDetails(city, deliveryDate);
-  if (prevDetails.length === 0) return rows;
+  const lookup = await fetchPriorNlcLookup(city, deliveryDate);
+  if (lookup.byLineKey.size === 0 && lookup.byFsn.size === 0) return rows;
 
-  const prevNlcByKey = new Map<string, number>();
-  for (const d of prevDetails) {
-    const key = detailLineKey(d.fsn_id, d.weight_unit);
-    const nlc =
-      d.nlc ??
-      (d.quoted_pp != null
-        ? d.quoted_pp + (d.pm_cost ?? 0) + (d.fml_dump ?? 0) + (d.pc ?? 0)
-        : null);
-    if (nlc != null) prevNlcByKey.set(key, nlc);
-  }
-
-  return rows.map((r) => {
-    const keys = [
-      detailLineKey(r.fsn_id, r.weight_unit_db ?? r.weight_unit),
-      detailLineKey(r.fsn_id, r.weight_unit),
-    ];
-    let prevDayNlc: number | null = null;
-    for (const key of keys) {
-      const hit = prevNlcByKey.get(key);
-      if (hit != null) {
-        prevDayNlc = hit;
-        break;
-      }
-    }
-    return { ...r, prev_day_nlc: prevDayNlc };
-  });
+  return rows.map((r) => ({
+    ...r,
+    prev_day_nlc: resolvePrevDayNlc(r.fsn_id, r.weight_unit_db, r.weight_unit, lookup),
+  }));
 }
 
 function buildDetailFromMysqlAndPrev(

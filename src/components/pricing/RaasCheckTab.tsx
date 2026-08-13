@@ -14,6 +14,7 @@ import {
 import { fetchPriceSheetDetails, fetchPriceSheetHeader, mergeHeaderAndDetails } from "@/lib/priceSheetDb";
 import { downloadCSV, parseCSVMatrix, toCSV } from "@/lib/csv";
 import { enrichRowsWithMysqlWeightUnits, loadFsnWeightUnitLookup } from "@/lib/fsnWeightUnit";
+import { formatLocalISO } from "@/lib/pricingSheetCache";
 
 const CITIES = ["Bengaluru", "Chennai", "Coimbatore", "Hyderabad", "Mumbai", "Nashik", "Trichy"];
 const PAGE_SIZE = 50;
@@ -26,7 +27,7 @@ const RAAS_MIN_COLS = RAAS_PRICE_COL + 1;
 const tomorrowISO = () => {
   const d = new Date();
   d.setDate(d.getDate() + 1);
-  return d.toISOString().slice(0, 10);
+  return formatLocalISO(d);
 };
 
 /** Strip currency symbols / commas / whitespace and parse a price. Blank → null. */

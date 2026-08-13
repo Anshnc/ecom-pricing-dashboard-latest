@@ -77,11 +77,15 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
   const impactGmBase = grnPerUnit !== null ? quotedNlc - grnPerUnit : null;
   const impactGm = impactGmBase !== null ? impactGmBase * (mixPct / 100) : null;
 
-  const computedDeflection = deflectionPctFromNlc(quotedNlc, row.prevDayNlc);
-  const deflectionPct = computedDeflection ?? row.storedDeflectionPct ?? null;
+  // Always recompute deflection when a prior NLC is resolved (line-key or FSN fallback).
+  const deflectionPct =
+    row.prevDayNlc != null && row.prevDayNlc !== 0
+      ? deflectionPctFromNlc(quotedNlc, row.prevDayNlc)
+      : row.storedDeflectionPct ?? null;
 
   const valueMix = row.blinkitSp !== null ? row.blinkitSp * row.demandUnits : null;
-  const nlcValueMix = nlc * row.demandUnits;
+  // NLC Value Mix = quoted NLC × demand (matches working-sheet "NLC" column × demand units).
+  const nlcValueMix = quotedNlc * row.demandUnits;
   const grnMarkup = grnPerUnit !== null ? row.quotedPp - grnPerUnit : null;
 
   return {

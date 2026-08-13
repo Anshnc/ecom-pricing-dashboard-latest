@@ -1,0 +1,201 @@
+-- Deflection: fall back to most recent prior NLC for the same FSN when weight_unit changed.
+
+CREATE OR REPLACE FUNCTION public.quoted_nlc_from_detail(
+  quoted_pp numeric,
+  pm_cost numeric,
+  fml_dump numeric,
+  pc numeric,
+  stored_nlc numeric
+) RETURNS numeric
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  select coalesce(
+    nullif(stored_nlc, 0),
+    case when quoted_pp is not null
+      then quoted_pp + coalesce(pm_cost, 0) + coalesce(fml_dump, 0) + coalesce(pc, 0)
+      else null
+    end
+  );
+$$;
+
+CREATE OR REPLACE FUNCTION public.lookup_prev_quoted_nlc(
+  p_fsn_id text,
+  p_weight_unit text,
+  p_city text,
+  p_delivery_date date
+) RETURNS numeric
+LANGUAGE plpgsql
+STABLE
+AS $$
+declare
+  prev_nlc numeric(12,2);
+begin
+  -- Prefer exact fsn + weight_unit match on the most recent prior sheet.
+  select public.quoted_nlc_from_detail(d.quoted_pp, d.pm_cost, d.fml_dump, d.pc, d.nlc)
+  into prev_nlc
+  from public.price_sheet_details d
+  join public.price_sheet ps on ps.price_sheet_id = d.price_sheet_id
+  where d.fsn_id = p_fsn_id
+    and d.weight_unit = p_weight_unit
+    and ps.city = p_city
+    and ps.delivery_date < p_delivery_date
+  order by ps.delivery_date desc
+  limit 1;
+
+  if prev_nlc is not null and prev_nlc <> 0 then
+    return prev_nlc;
+  end if;
+
+  -- Fallback: same FSN on the most recent prior sheet (weight unit may have changed).
+  select public.quoted_nlc_from_detail(d.quoted_pp, d.pm_cost, d.fml_dump, d.pc, d.nlc)
+  into prev_nlc
+  from public.price_sheet_details d
+  join public.price_sheet ps on ps.price_sheet_id = d.price_sheet_id
+  where d.fsn_id = p_fsn_id
+    and ps.city = p_city
+    and ps.delivery_date < p_delivery_date
+  order by ps.delivery_date desc
+  limit 1;
+
+  if prev_nlc is null or prev_nlc = 0 then
+    return null;
+  end if;
+
+  return prev_nlc;
+end;
+$$;
+
+CREATE OR REPLACE FUNCTION public.calculate_price_sheet_detail_metrics()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+declare
+  hdr_delivery_date date;
+  hdr_city text;
+  prev_nlc numeric(12,2);
+  grn_delta numeric(12,2) := 0;
+  ref_pm_cost numeric(12,2);
+  ref_fml_dump numeric(12,2);
+  ref_pc numeric(12,2);
+  prev_quoted_pp numeric(12,2);
+begin
+  select ps.delivery_date, ps.city
+  into hdr_delivery_date, hdr_city
+  from public.price_sheet ps
+  where ps.price_sheet_id = new.price_sheet_id;
+
+  new.updated_at := now();
+
+  select scc.pm_cost, scc.fml_dump, scc.pc
+  into ref_pm_cost, ref_fml_dump, ref_pc
+  from public.fsn_cost_components scc
+  where scc.fsn_id = new.fsn_id
+    and scc.weight_unit = new.weight_unit;
+
+  if new.pm_cost is null or new.pm_cost = 0 then
+    new.pm_cost := coalesce(nullif(ref_pm_cost, 0), coalesce(new.pm_cost, 0));
+  end if;
+  if new.fml_dump is null or new.fml_dump = 0 then
+    new.fml_dump := coalesce(nullif(ref_fml_dump, 0), coalesce(new.fml_dump, 0));
+  end if;
+  if new.pc is null or new.pc = 0 then
+    new.pc := coalesce(nullif(ref_pc, 0), coalesce(new.pc, 0));
+  end if;
+
+  if TG_OP = 'INSERT' then
+    select d.quoted_pp
+    into prev_quoted_pp
+    from public.price_sheet_details d
+    join public.price_sheet ps on ps.price_sheet_id = d.price_sheet_id
+    where d.fsn_id = new.fsn_id
+      and d.weight_unit = new.weight_unit
+      and ps.city = hdr_city
+      and ps.delivery_date < hdr_delivery_date
+    order by ps.delivery_date desc
+    limit 1;
+
+    if new.quoted_pp is null then new.quoted_pp := prev_quoted_pp; end if;
+  end if;
+
+  new.grn_price_per_kg := coalesce(new.grn_price_per_kg, new.prev_grn_price_per_kg, new.t3_grn_price_per_kg);
+  new.grn_price_per_unit := coalesce(new.grn_price_per_unit, new.prev_grn_price_per_unit, new.t3_grn_price_per_unit);
+
+  if TG_OP = 'UPDATE' then
+    grn_delta := coalesce(new.adjusted_grn, 0) - coalesce(old.adjusted_grn, 0);
+  elsif TG_OP = 'INSERT' then
+    grn_delta := coalesce(new.adjusted_grn, 0);
+  end if;
+  if grn_delta <> 0 then
+    if TG_OP = 'UPDATE' or new.quoted_pp is null then
+      new.quoted_pp := coalesce(new.quoted_pp, 0) + grn_delta;
+    end if;
+  end if;
+
+  new.nlc := coalesce(new.quoted_pp, 0) + coalesce(new.pm_cost, 0) + coalesce(new.fml_dump, 0) + coalesce(new.pc, 0);
+
+  if new.blinkit_sp is not null and new.blinkit_sp <> 0 then
+    new.pi_pct := round(((new.blinkit_sp - new.nlc) / new.blinkit_sp) * 100, 2);
+  else
+    new.pi_pct := null;
+  end if;
+
+  if new.grn_price_per_unit is not null then
+    new.gm := new.nlc - new.grn_price_per_unit;
+  else
+    new.gm := null;
+  end if;
+
+  if new.grn_price_per_unit is not null and new.prev_grn_price_per_unit is not null then
+    new.grn_diff := new.grn_price_per_unit - new.prev_grn_price_per_unit;
+  else
+    new.grn_diff := null;
+  end if;
+
+  prev_nlc := public.lookup_prev_quoted_nlc(new.fsn_id, new.weight_unit, hdr_city, hdr_delivery_date);
+
+  if prev_nlc is not null and prev_nlc <> 0 then
+    new.deflection_pct := round(((new.nlc - prev_nlc) / prev_nlc) * 100, 2);
+  else
+    new.deflection_pct := null;
+  end if;
+
+  if new.grn_price_per_unit is not null and new.demand_pct is not null then
+    new.impact_pp_diff := round((coalesce(new.quoted_pp, 0) - new.grn_price_per_unit) * new.demand_pct / 100, 2);
+  else
+    new.impact_pp_diff := null;
+  end if;
+
+  if new.gm is not null and new.demand_pct is not null then
+    new.impact_gm := round(new.gm * new.demand_pct / 100, 2);
+  else
+    new.impact_gm := null;
+  end if;
+
+  if new.blinkit_sp is not null and new.demand_units is not null then
+    new.bk_value_mix := round(new.blinkit_sp * new.demand_units, 2);
+  else
+    new.bk_value_mix := null;
+  end if;
+
+  return new;
+end;
+$function$;
+
+-- Recompute deflection on all existing rows.
+update public.price_sheet_details d
+set deflection_pct = sub.deflection_pct
+from (
+  select
+    d2.price_sheet_details_id,
+    round(
+      ((d2.nlc - public.lookup_prev_quoted_nlc(d2.fsn_id, d2.weight_unit, ps.city, ps.delivery_date))
+        / public.lookup_prev_quoted_nlc(d2.fsn_id, d2.weight_unit, ps.city, ps.delivery_date)) * 100,
+      2
+    ) as deflection_pct
+  from public.price_sheet_details d2
+  join public.price_sheet ps on ps.price_sheet_id = d2.price_sheet_id
+  where public.lookup_prev_quoted_nlc(d2.fsn_id, d2.weight_unit, ps.city, ps.delivery_date) is not null
+    and public.lookup_prev_quoted_nlc(d2.fsn_id, d2.weight_unit, ps.city, ps.delivery_date) <> 0
+) sub
+where d.price_sheet_details_id = sub.price_sheet_details_id;
