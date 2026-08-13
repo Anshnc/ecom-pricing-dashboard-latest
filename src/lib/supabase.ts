@@ -1,18 +1,29 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { getSupabasePublishableKey, getSupabaseUrl } from "@/lib/supabaseEnv";
 
-const SUPABASE_URL = getSupabaseUrl();
-const SUPABASE_PUBLISHABLE_KEY = getSupabasePublishableKey();
+let supabaseClient: SupabaseClient | null = null;
 
-if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
-  throw new Error(
-    "Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env " +
-      "(or SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY in production).",
-  );
+function createSupabaseClient(): SupabaseClient {
+  const url = getSupabaseUrl();
+  const key = getSupabasePublishableKey();
+  if (!url || !key) {
+    throw new Error(
+      "Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env " +
+        "(or SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY in production).",
+    );
+  }
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
 }
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
+/** Lazy singleton — avoids throwing during SSR module init when env is loaded at runtime. */
+export const supabase: SupabaseClient = new Proxy({} as SupabaseClient, {
+  get(_target, prop) {
+    if (!supabaseClient) supabaseClient = createSupabaseClient();
+    const value = supabaseClient[prop as keyof SupabaseClient];
+    return typeof value === "function" ? value.bind(supabaseClient) : value;
+  },
 });
 
 export type PriceSheetStatus = "Created" | "Submitted for Approval" | "Approved";
