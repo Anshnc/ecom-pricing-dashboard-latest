@@ -109,11 +109,49 @@ async function fetchPreviousDayDetails(city: string, deliveryDate: string): Prom
   if (!prevHeader) return [];
   const { data, error } = await supabase
     .from("price_sheet_details")
-    .select("fsn_id,weight_unit,quoted_pp,negotiated_pp")
+    .select("fsn_id,weight_unit,quoted_pp,negotiated_pp,nlc,pm_cost,fml_dump,pc")
     .eq("price_sheet_id", prevHeader.price_sheet_id)
     .limit(5000);
   if (error) throw error;
   return (data ?? []) as PriceSheetDetailRow[];
+}
+
+/** Attach prior-day quoted NLC for client-side deflection when DB value is missing/stale. */
+export async function enrichRowsWithPreviousDayNlc<T extends PricingSheetRow>(
+  rows: T[],
+  city: string,
+  deliveryDate: string,
+): Promise<(T & { prev_day_nlc?: number | null })[]> {
+  if (rows.length === 0) return rows;
+  const prevDetails = await fetchPreviousDayDetails(city, deliveryDate);
+  if (prevDetails.length === 0) return rows;
+
+  const prevNlcByKey = new Map<string, number>();
+  for (const d of prevDetails) {
+    const key = detailLineKey(d.fsn_id, d.weight_unit);
+    const nlc =
+      d.nlc ??
+      (d.quoted_pp != null
+        ? d.quoted_pp + (d.pm_cost ?? 0) + (d.fml_dump ?? 0) + (d.pc ?? 0)
+        : null);
+    if (nlc != null) prevNlcByKey.set(key, nlc);
+  }
+
+  return rows.map((r) => {
+    const keys = [
+      detailLineKey(r.fsn_id, r.weight_unit_db ?? r.weight_unit),
+      detailLineKey(r.fsn_id, r.weight_unit),
+    ];
+    let prevDayNlc: number | null = null;
+    for (const key of keys) {
+      const hit = prevNlcByKey.get(key);
+      if (hit != null) {
+        prevDayNlc = hit;
+        break;
+      }
+    }
+    return { ...r, prev_day_nlc: prevDayNlc };
+  });
 }
 
 function buildDetailFromMysqlAndPrev(
@@ -195,9 +233,12 @@ export async function loadOrCreatePriceSheet(
   const existing = await fetchPriceSheetHeader(city, deliveryDate);
   if (existing) {
     const details = await fetchPriceSheetDetails(existing.price_sheet_id);
+    let rows = mergeHeaderAndDetails(existing, details);
+    rows = await applySkuCostComponents(rows);
+    rows = await enrichRowsWithPreviousDayNlc(rows, city, deliveryDate);
     return {
       header: existing,
-      rows: mergeHeaderAndDetails(existing, details),
+      rows,
       created: false,
     };
   }
@@ -239,9 +280,12 @@ export async function loadOrCreatePriceSheet(
   await insertDetailsInChunks(enrichedPayload);
 
   const details = await fetchPriceSheetDetails(header.price_sheet_id);
+  let rows = mergeHeaderAndDetails(header as PriceSheetHeader, details);
+  rows = await applySkuCostComponents(rows);
+  rows = await enrichRowsWithPreviousDayNlc(rows, city, deliveryDate);
   return {
     header: header as PriceSheetHeader,
-    rows: mergeHeaderAndDetails(header as PriceSheetHeader, details),
+    rows,
     created: true,
   };
 }

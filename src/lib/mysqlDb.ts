@@ -6,12 +6,12 @@ export type DbCreds = {
   database: string;
 };
 
-function isServerlessRuntime(): boolean {
-  return Boolean(
-    process.env.VERCEL ||
-      process.env.AWS_LAMBDA_FUNCTION_NAME ||
-      process.env.NETLIFY ||
-      process.cwd() === "/var/task",
+function isProductionDeploy(): boolean {
+  return (
+    process.env.VERCEL_ENV === "production" ||
+    process.env.CONTEXT === "production" ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME && !process.env.AWS_SAM_LOCAL) ||
+    process.cwd() === "/var/task"
   );
 }
 
@@ -30,6 +30,10 @@ function fromDiscreteEnv(): DbCreds | null {
 function fromJsonEnv(): DbCreds | null {
   const raw = process.env.NBS_DB_CREDENTIALS ?? process.env.DB_CREDENTIALS;
   if (!raw?.trim()) return null;
+  return parseCredentialsJson(raw);
+}
+
+function parseCredentialsJson(raw: string): DbCreds {
   const parsed = JSON.parse(raw) as {
     host: string;
     port: number | string;
@@ -46,29 +50,42 @@ function fromJsonEnv(): DbCreds | null {
   };
 }
 
-async function fromLocalCredentialsFile(): Promise<DbCreds | null> {
-  if (isServerlessRuntime()) return null;
+async function credentialsFileCandidates(): Promise<string[]> {
+  const { join, dirname } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+
+  const candidates: string[] = [];
+  const explicitPath =
+    process.env.NBS_DB_CREDENTIALS_FILE ?? process.env.DB_CREDENTIALS_FILE;
+  if (explicitPath?.trim()) candidates.push(explicitPath.trim());
+
+  candidates.push(join(process.cwd(), "dbcredentials"));
+
   try {
-    const { readFile } = await import("node:fs/promises");
-    const { join } = await import("node:path");
-    const raw = await readFile(join(process.cwd(), "dbcredentials"), "utf8");
-    const parsed = JSON.parse(raw) as {
-      host: string;
-      port: number | string;
-      user: string;
-      password: string;
-      database: string;
-    };
-    return {
-      host: parsed.host,
-      port: Number(parsed.port),
-      user: parsed.user,
-      password: parsed.password,
-      database: parsed.database,
-    };
+    const here = dirname(fileURLToPath(import.meta.url));
+    candidates.push(join(here, "..", "..", "dbcredentials"));
   } catch {
-    return null;
+    // Bundled runtimes may not expose import.meta.url.
   }
+
+  return [...new Set(candidates)];
+}
+
+async function fromLocalCredentialsFile(): Promise<DbCreds | null> {
+  if (isProductionDeploy()) return null;
+
+  const { readFile } = await import("node:fs/promises");
+
+  for (const filePath of await credentialsFileCandidates()) {
+    try {
+      const raw = await readFile(filePath, "utf8");
+      return parseCredentialsJson(raw);
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
 }
 
 export async function loadDbCreds(): Promise<DbCreds> {
@@ -79,9 +96,9 @@ export async function loadDbCreds(): Promise<DbCreds> {
   if (fromFile) return fromFile;
 
   throw new Error(
-    "MySQL credentials missing. On Vercel/production set NBS_DB_CREDENTIALS (JSON) " +
-      "or NBS_DB_HOST / NBS_DB_PORT / NBS_DB_USER / NBS_DB_PASSWORD / NBS_DB_DATABASE. " +
-      "Locally you can also use a dbcredentials file in the project root.",
+    "MySQL credentials missing. In production (Vercel/Lovable/Cloudflare) set NBS_DB_CREDENTIALS " +
+      "(JSON) or NBS_DB_HOST / NBS_DB_PORT / NBS_DB_USER / NBS_DB_PASSWORD / NBS_DB_DATABASE. " +
+      "Locally, place a dbcredentials JSON file in the project root.",
   );
 }
 

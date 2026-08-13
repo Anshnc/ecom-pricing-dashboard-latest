@@ -171,31 +171,63 @@ export async function fetchSkuCostComponents(
   return out;
 }
 
-/** Apply reference-table costs onto detail rows when those columns are null. */
+/** Apply reference-table costs onto detail rows when missing or zero. */
+function costNeedsFill(v: number | null | undefined): boolean {
+  return v == null || v === 0;
+}
+
+function resolveCost(
+  current: number | null | undefined,
+  reference: number | null | undefined,
+): number | null {
+  if (!costNeedsFill(current)) return current ?? null;
+  if (reference != null && reference !== 0) return reference;
+  return current ?? null;
+}
+
 export async function applySkuCostComponents<
   T extends {
     fsn_id?: string | null;
     weight_unit?: string | null;
+    weight_unit_db?: string | null;
     pm_cost?: number | null;
     fml_dump?: number | null;
     pc?: number | null;
   },
 >(rows: T[]): Promise<T[]> {
-  const pairs = rows
-    .filter((r) => r.fsn_id && (r.pm_cost == null || r.fml_dump == null || r.pc == null))
-    .map((r) => ({ fsn_id: r.fsn_id!, weight_unit: r.weight_unit ?? null }));
+  const pairs: Array<{ fsn_id: string; weight_unit: string | null }> = [];
+  for (const r of rows) {
+    if (!r.fsn_id) continue;
+    if (!costNeedsFill(r.pm_cost) && !costNeedsFill(r.fml_dump) && !costNeedsFill(r.pc)) continue;
+    pairs.push({ fsn_id: r.fsn_id, weight_unit: r.weight_unit ?? null });
+    if (r.weight_unit_db && r.weight_unit_db !== r.weight_unit) {
+      pairs.push({ fsn_id: r.fsn_id, weight_unit: r.weight_unit_db });
+    }
+  }
   if (pairs.length === 0) return rows;
 
   const costs = await fetchSkuCostComponents(pairs);
   return rows.map((r) => {
-    const key = skuCostKey(String(r.fsn_id ?? ""), r.weight_unit);
-    const c = costs.get(key);
+    const keys = [
+      skuCostKey(String(r.fsn_id ?? ""), r.weight_unit),
+      r.weight_unit_db ? skuCostKey(String(r.fsn_id ?? ""), r.weight_unit_db) : null,
+    ].filter(Boolean) as string[];
+
+    let c: Pick<FsnCostComponent, "pm_cost" | "fml_dump" | "pc"> | undefined;
+    for (const key of keys) {
+      const hit = costs.get(key);
+      if (hit) {
+        c = hit;
+        break;
+      }
+    }
     if (!c) return r;
+
     return {
       ...r,
-      pm_cost: r.pm_cost ?? c.pm_cost ?? null,
-      fml_dump: r.fml_dump ?? c.fml_dump ?? null,
-      pc: r.pc ?? c.pc ?? null,
+      pm_cost: resolveCost(r.pm_cost, c.pm_cost),
+      fml_dump: resolveCost(r.fml_dump, c.fml_dump),
+      pc: resolveCost(r.pc, c.pc),
     };
   });
 }

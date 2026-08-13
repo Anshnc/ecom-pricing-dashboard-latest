@@ -1,9 +1,15 @@
 import { createClient } from "@supabase/supabase-js";
+import { getSupabasePublishableKey, getSupabaseUrl } from "@/lib/supabaseEnv";
 
-// External Supabase project (BYO). Publishable key is safe on the client.
-const SUPABASE_URL = "https://ienxcmcnevffdisehxnh.supabase.co";
-const SUPABASE_PUBLISHABLE_KEY =
-  "sb_publishable_7MQUBROngx7GmPB6thoiIA_MkjEWEnw";
+const SUPABASE_URL = getSupabaseUrl();
+const SUPABASE_PUBLISHABLE_KEY = getSupabasePublishableKey();
+
+if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+  throw new Error(
+    "Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env " +
+      "(or SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY in production).",
+  );
+}
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
@@ -59,6 +65,8 @@ export type PriceSheetDetailRow = {
   impact_pp_diff: number | null;
   impact_gm: number | null;
   bk_value_mix: number | null;
+  /** Prior-day quoted NLC — client enrichment for deflection (not a DB column). */
+  prev_day_nlc?: number | null;
   created_at?: string | null;
   updated_at?: string | null;
   nlc_negotiated?: number | null;

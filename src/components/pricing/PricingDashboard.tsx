@@ -48,6 +48,7 @@ import {
   ChevronLeft,
 } from "lucide-react";
 import { loadPricingSheetDemand, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
+import { computeRowMetrics } from "@/lib/pricingMetrics";
 import { upsertFsnCostComponentsFromCsv, fetchFsnCostComponentsByFsns, parseFsnCostCsvRows } from "@/lib/skuCostComponents";
 import { RaasCheckTab } from "@/components/pricing/RaasCheckTab";
 import { RowAuditExpandButton } from "@/components/pricing/RowAuditHistoryButton";
@@ -151,7 +152,8 @@ type SkuRow = {
   packagingCost: number;
   fmlCost: number;
   processingCost: number;
-  priceDeflectionPct: number;
+  priceDeflectionPct: number | null;
+  prevDayNlc?: number | null;
 };
 
 const SEED: SkuRow[] = [
@@ -183,7 +185,8 @@ const VIOLATIONS: { key: string; label: string }[] = [
 const DEFLECTION_MIN = -8;
 const DEFLECTION_MAX = 8;
 
-function isDeflectionOutOfRange(pct: number, min = DEFLECTION_MIN, max = DEFLECTION_MAX) {
+function isDeflectionOutOfRange(pct: number | null | undefined, min = DEFLECTION_MIN, max = DEFLECTION_MAX) {
+  if (pct == null) return false;
   return pct < min || pct > max;
 }
 
@@ -247,38 +250,32 @@ function dbToSku(r: PricingSheetRow): SkuRow {
     packagingCost: r.pm_cost ?? 0,
     fmlCost: r.fml_dump ?? 0,
     processingCost: r.pc ?? 0,
-    priceDeflectionPct: r.deflection_pct ?? 0,
+    priceDeflectionPct: r.deflection_pct ?? null,
+    prevDayNlc: r.prev_day_nlc ?? null,
   };
 }
 
 
 // ---------- Derived row math ----------
 function deriveRow(r: SkuRow, totalDemand: number) {
-  const grnPerUnit = r.grnPricePerKg !== null ? r.grnPricePerKg * r.conversionFactor : null;
-  const adj = r.adjustedGrn ?? 0;
-  const effectiveGrnPerUnit = grnPerUnit !== null ? grnPerUnit + adj : null;
-  const grnDiff =
-    effectiveGrnPerUnit !== null && r.prevDayGrnPerUnit !== null && r.prevDayGrnPerUnit !== undefined
-      ? effectiveGrnPerUnit - r.prevDayGrnPerUnit
-      : null;
-  const nlc = r.negotiatedPp + r.packagingCost + r.fmlCost + r.processingCost;
-  const piPct = r.blinkitSp ? ((r.blinkitSp - nlc) / r.blinkitSp) * 100 : null;
-  const gm = grnPerUnit !== null ? nlc - grnPerUnit : null;
-  const totalDemandPct = totalDemand ? (r.demandUnits / totalDemand) * 100 : 0;
-  const quotedNlc = r.quotedPp + r.packagingCost + r.fmlCost + r.processingCost;
-  const impactGmBase = grnPerUnit !== null ? quotedNlc - grnPerUnit : null;
-  const impactPpDiff =
-    grnPerUnit !== null && r.piMixPct !== null
-      ? (r.quotedPp - grnPerUnit) * (r.piMixPct / 100)
-      : null;
-  const impactGm =
-    impactGmBase !== null && r.piMixPct !== null
-      ? impactGmBase * (r.piMixPct / 100)
-      : null;
-  const valueMix = r.blinkitSp !== null ? r.blinkitSp * r.demandUnits : null;
-  const nlcValueMix = nlc * r.demandUnits;
-  const grnMarkup = grnPerUnit !== null ? r.quotedPp - grnPerUnit : null;
-  return { grnPerUnit, prevDayGrnPerUnit: r.prevDayGrnPerUnit ?? null, grnDiff, nlc, piPct, gm, totalDemandPct, impactPpDiff, impactGm, valueMix, nlcValueMix, grnMarkup };
+  return computeRowMetrics(
+    {
+      demandUnits: r.demandUnits,
+      conversionFactor: r.conversionFactor,
+      grnPricePerKg: r.grnPricePerKg,
+      prevDayGrnPerUnit: r.prevDayGrnPerUnit,
+      adjustedGrn: r.adjustedGrn,
+      quotedPp: r.quotedPp,
+      negotiatedPp: r.negotiatedPp,
+      packagingCost: r.packagingCost,
+      fmlCost: r.fmlCost,
+      processingCost: r.processingCost,
+      blinkitSp: r.blinkitSp,
+      prevDayNlc: r.prevDayNlc,
+      storedDeflectionPct: r.priceDeflectionPct,
+    },
+    totalDemand,
+  );
 }
 
 /** Map a SkuRow into cascade fields for audit fallbacks (when no DB snapshot exists). */
@@ -359,7 +356,7 @@ function computePriceUploadAverages(enriched: Enriched[]) {
     blinkitSp: weightedByDemandPct(enriched, (e) => e.row.blinkitSp),
     nlc: wNlc,
     piPct: weightedByDemandPct(enriched, (e) => e.calc.piPct),
-    priceDeflectionPct: weightedByDemandPct(enriched, (e) => e.row.priceDeflectionPct),
+    priceDeflectionPct: weightedByDemandPct(enriched, (e) => e.calc.deflectionPct),
     impactPpDiff: plainSum(enriched, (e) => e.calc.impactPpDiff),
     impactGm: plainSum(enriched, (e) => e.calc.impactGm),
     valueMix: weightedByDemandPct(enriched, (e) => e.calc.valueMix),
@@ -609,10 +606,7 @@ export function PricingDashboard() {
   const totalDemand = useMemo(() => rows.reduce((s, r) => s + r.demandUnits, 0), [rows]);
 
   const enriched = useMemo(
-    () => rows.map((r) => {
-      const effective = { ...r, piMixPct: r.blinkitSp === null ? 0 : r.piMixPct };
-      return { row: effective, calc: deriveRow(effective, totalDemand) };
-    }),
+    () => rows.map((r) => ({ row: r, calc: deriveRow(r, totalDemand) })),
     [rows, totalDemand]
   );
 
@@ -623,7 +617,7 @@ export function PricingDashboard() {
     if (fs.has("blank_bk") && row.blinkitSp === null) return true;
     if (fs.has("missing_grn") && row.grnPricePerKg === null) return true;
     if (fs.has("has_suggested") && row.suggestedPp !== null) return true;
-    if (fs.has("high_deflection") && isDeflectionOutOfRange(row.priceDeflectionPct)) return true;
+    if (fs.has("high_deflection") && isDeflectionOutOfRange(calc.deflectionPct)) return true;
     return false;
   }, []);
 
@@ -694,7 +688,7 @@ export function PricingDashboard() {
         case "nlc": return e.calc.nlc;
         case "piPct": return e.calc.piPct ?? -Infinity;
         case "gm": return e.calc.gm ?? -Infinity;
-        case "priceDeflectionPct": return e.row.priceDeflectionPct;
+        case "priceDeflectionPct": return e.calc.deflectionPct ?? -Infinity;
         case "impactPpDiff": return e.calc.impactPpDiff ?? -Infinity;
         case "impactGm": return e.calc.impactGm ?? -Infinity;
         case "valueMix": return e.calc.valueMix ?? -Infinity;
@@ -1274,7 +1268,7 @@ export function PricingDashboard() {
                       calc.nlc.toFixed(2),
                       calc.piPct?.toFixed(2) ?? "",
                       calc.gm?.toFixed(2) ?? "",
-                      row.priceDeflectionPct,
+                      calc.deflectionPct?.toFixed(2) ?? "",
                       calc.impactPpDiff?.toFixed(2) ?? "",
                       calc.impactGm?.toFixed(2) ?? "",
                       calc.valueMix?.toFixed(0) ?? "",
@@ -2002,7 +1996,7 @@ function FrozenTable({
         {rows.map(({ row, calc }) => {
           const negPi = calc.piPct !== null && calc.piPct < 0;
           const negGm = calc.gm !== null && calc.gm < 0;
-          const highDefl = isDeflectionOutOfRange(row.priceDeflectionPct);
+          const highDefl = isDeflectionOutOfRange(calc.deflectionPct);
           const unlocked = hasUnlockedCell(row);
           const rowCls = [
             unlocked ? "bg-yellow-50 hover:bg-yellow-100/80" : "hover:bg-muted/40",
@@ -2402,8 +2396,8 @@ function ScrollTable({
                 {calc.gm !== null ? fmt(calc.gm) : "—"}
               </td>
               {/* Deflection % */}
-              <td className={`px-2 text-right tabular-nums ${isDeflectionOutOfRange(row.priceDeflectionPct) ? "bg-warn-bg text-warn-foreground font-semibold" : ""}`}>
-                {row.priceDeflectionPct}%
+              <td className={`px-2 text-right tabular-nums ${isDeflectionOutOfRange(calc.deflectionPct) ? "bg-warn-bg text-warn-foreground font-semibold" : ""}`}>
+                {calc.deflectionPct !== null ? `${calc.deflectionPct.toFixed(1)}%` : "—"}
 
               </td>
               {/* Impact PP Diff */}
@@ -3754,16 +3748,13 @@ function PriceApprovalTab({
   const totalDemand = useMemo(() => rows.reduce((s, r) => s + r.demandUnits, 0), [rows]);
 
   const enriched = useMemo(() =>
-    rows.map((r) => {
-      const effective = { ...r, piMixPct: r.blinkitSp === null ? 0 : r.piMixPct };
-      return { row: effective, calc: deriveRow(effective, totalDemand) };
-    }),
+    rows.map((r) => ({ row: r, calc: deriveRow(r, totalDemand) })),
   [rows, totalDemand]);
 
   const violationOf = (e: { row: ApprovalRow; calc: ReturnType<typeof deriveRow> }) => {
     const pi = e.calc.piPct;
     const gm = e.calc.gm;
-    const defl = e.row.priceDeflectionPct;
+    const defl = e.calc.deflectionPct;
     const negPi = pi !== null && pi < 0;
     const negGm = gm !== null && gm < 0;
     const piOutOfRange = pi !== null && (pi < piMin || pi > piMax);
@@ -3834,7 +3825,7 @@ function PriceApprovalTab({
           case "nlc": return e.calc.nlc;
           case "piPct": return e.calc.piPct ?? -Infinity;
           case "gm": return e.calc.gm ?? -Infinity;
-          case "priceDeflectionPct": return e.row.priceDeflectionPct;
+          case "priceDeflectionPct": return e.calc.deflectionPct ?? -Infinity;
           default: return 0;
         }
       };
@@ -3863,7 +3854,7 @@ function PriceApprovalTab({
       nlc: avg(src.map((e) => e.calc.nlc)),
       piPct: avg(valid(src.map((e) => e.calc.piPct))),
       gm: avg(valid(src.map((e) => e.calc.gm))),
-      defl: avg(src.map((e) => e.row.priceDeflectionPct)),
+      defl: avg(src.map((e) => e.calc.deflectionPct)),
     };
   }, [filtered]);
 
@@ -4411,8 +4402,8 @@ function ApprovalScrollTable({
               <td className="px-2 text-right tabular-nums">
                 {calc.gm !== null ? fmt(calc.gm) : "—"}
               </td>
-              <td className={`px-2 text-right tabular-nums ${isDeflectionOutOfRange(row.priceDeflectionPct) ? "bg-warn-bg text-warn-foreground font-semibold" : ""}`}>
-                {row.priceDeflectionPct}%
+              <td className={`px-2 text-right tabular-nums ${isDeflectionOutOfRange(calc.deflectionPct) ? "bg-warn-bg text-warn-foreground font-semibold" : ""}`}>
+                {calc.deflectionPct !== null ? `${calc.deflectionPct.toFixed(1)}%` : "—"}
               </td>
             </tr>
           );

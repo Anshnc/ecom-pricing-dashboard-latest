@@ -3,6 +3,7 @@ import { enrichRowsWithMysqlWeightUnits } from "@/lib/fsnWeightUnit";
 import {
   fetchPriceSheetDetails,
   fetchPriceSheetHeader,
+  enrichRowsWithPreviousDayNlc,
   loadOrCreatePriceSheet,
   mergeHeaderAndDetails,
   submitPriceSheet,
@@ -37,13 +38,17 @@ export function usePricingSheet(params: { city?: string; deliveryDate?: string; 
     }
 
     let result = mergeHeaderAndDetails(header, await fetchPriceSheetDetails(header.price_sheet_id));
-    result = await applySkuCostComponents(result);
-    setPriceSheetId(header.price_sheet_id);
 
     if (city) {
       result = (await enrichRowsWithMysqlWeightUnits(result, city)) as PricingSheetRow[];
     }
 
+    result = await applySkuCostComponents(result);
+    if (city && deliveryDate) {
+      result = await enrichRowsWithPreviousDayNlc(result, city, deliveryDate);
+    }
+
+    setPriceSheetId(header.price_sheet_id);
     setRows(result);
     setLoading(false);
   }, [city, deliveryDate]);
