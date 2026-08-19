@@ -147,28 +147,73 @@ export async function fetchAllFsnCostComponents(): Promise<FsnCostComponent[]> {
   return (data ?? []) as FsnCostComponent[];
 }
 
+type SkuCostValues = Pick<FsnCostComponent, "pm_cost" | "fml_dump" | "pc">;
+
+export type SkuCostLookup = {
+  byKey: Map<string, SkuCostValues>;
+  /** Populated only when exactly one fsn_cost_components row exists for the FSN. */
+  byFsnOnly: Map<string, SkuCostValues>;
+};
+
+function toSkuCostValues(row: SkuCostValues): SkuCostValues {
+  return { pm_cost: row.pm_cost, fml_dump: row.fml_dump, pc: row.pc };
+}
+
+/** Build exact (fsn, weight_unit) and unambiguous FSN-only lookup maps. */
+export function buildSkuCostLookup(rows: FsnCostComponent[]): SkuCostLookup {
+  const byKey = new Map<string, SkuCostValues>();
+  const rowsByFsn = new Map<string, FsnCostComponent[]>();
+
+  for (const row of rows) {
+    byKey.set(skuCostKey(row.fsn_id, row.weight_unit), toSkuCostValues(row));
+    const fsnKey = fsnWeightKey(row.fsn_id);
+    const list = rowsByFsn.get(fsnKey) ?? [];
+    list.push(row);
+    rowsByFsn.set(fsnKey, list);
+  }
+
+  const byFsnOnly = new Map<string, SkuCostValues>();
+  for (const [fsnKey, list] of rowsByFsn) {
+    if (list.length === 1) byFsnOnly.set(fsnKey, toSkuCostValues(list[0]!));
+  }
+
+  return { byKey, byFsnOnly };
+}
+
+function resolveSkuCostFromLookup(
+  lookup: SkuCostLookup,
+  fsnId: string,
+  weightUnit?: string | null,
+  weightUnitDb?: string | null,
+): SkuCostValues | undefined {
+  const keys = [
+    skuCostKey(fsnId, weightUnit),
+    weightUnitDb ? skuCostKey(fsnId, weightUnitDb) : null,
+  ].filter(Boolean) as string[];
+
+  for (const key of keys) {
+    const hit = lookup.byKey.get(key);
+    if (hit) return hit;
+  }
+
+  return lookup.byFsnOnly.get(fsnWeightKey(fsnId));
+}
+
 /** Lookup fixed pm_cost / fml_dump / pc for FSN + weight unit pairs. */
 export async function fetchSkuCostComponents(
   pairs: Array<{ fsn_id: string; weight_unit: string | null }>,
-): Promise<Map<string, Pick<FsnCostComponent, "pm_cost" | "fml_dump" | "pc">>> {
-  const out = new Map<string, Pick<FsnCostComponent, "pm_cost" | "fml_dump" | "pc">>();
+): Promise<SkuCostLookup> {
+  const empty: SkuCostLookup = { byKey: new Map(), byFsnOnly: new Map() };
   const fsns = Array.from(new Set(pairs.map((p) => p.fsn_id).filter(Boolean)));
-  if (fsns.length === 0) return out;
+  if (fsns.length === 0) return empty;
 
   const { data, error } = await supabase
     .from(TABLE)
     .select("fsn_id,weight_unit,pm_cost,fml_dump,pc")
     .in("fsn_id", fsns);
-  if (error || !data) return out;
+  if (error || !data) return empty;
 
-  for (const row of data as FsnCostComponent[]) {
-    out.set(skuCostKey(row.fsn_id, row.weight_unit), {
-      pm_cost: row.pm_cost,
-      fml_dump: row.fml_dump,
-      pc: row.pc,
-    });
-  }
-  return out;
+  return buildSkuCostLookup(data as FsnCostComponent[]);
 }
 
 /** Apply reference-table costs onto detail rows when missing or zero. */
@@ -206,21 +251,11 @@ export async function applySkuCostComponents<
   }
   if (pairs.length === 0) return rows;
 
-  const costs = await fetchSkuCostComponents(pairs);
+  const lookup = await fetchSkuCostComponents(pairs);
   return rows.map((r) => {
-    const keys = [
-      skuCostKey(String(r.fsn_id ?? ""), r.weight_unit),
-      r.weight_unit_db ? skuCostKey(String(r.fsn_id ?? ""), r.weight_unit_db) : null,
-    ].filter(Boolean) as string[];
+    if (!r.fsn_id) return r;
 
-    let c: Pick<FsnCostComponent, "pm_cost" | "fml_dump" | "pc"> | undefined;
-    for (const key of keys) {
-      const hit = costs.get(key);
-      if (hit) {
-        c = hit;
-        break;
-      }
-    }
+    const c = resolveSkuCostFromLookup(lookup, r.fsn_id, r.weight_unit, r.weight_unit_db);
     if (!c) return r;
 
     return {

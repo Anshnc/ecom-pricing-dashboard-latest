@@ -48,6 +48,7 @@ import {
   ChevronLeft,
 } from "lucide-react";
 import { formatLocalISO, loadPricingSheetDemand, todayISO, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
+import { useFrozenSort, type SortDir } from "@/hooks/useFrozenSort";
 import { computeRowMetrics } from "@/lib/pricingMetrics";
 import { upsertFsnCostComponentsFromCsv, fetchFsnCostComponentsByFsns, parseFsnCostCsvRows } from "@/lib/skuCostComponents";
 import { RaasCheckTab } from "@/components/pricing/RaasCheckTab";
@@ -392,7 +393,36 @@ function Tip({ text, children }: { text: string; children: React.ReactNode }) {
 }
 
 // ---------- Sort header ----------
-type SortDir = "asc" | "desc" | null;
+
+function enrichedRowKey(e: { row: { fsnId: string; dbWeightUnit?: string | null; weightUnit: string } }) {
+  return auditRowKey(e.row.fsnId, e.row.dbWeightUnit ?? e.row.weightUnit);
+}
+
+function getMainPricingSortValue(e: { row: SkuRow; calc: ReturnType<typeof deriveRow> }, sortKey: string): number | string {
+  switch (sortKey) {
+    case "demandUnits": return e.row.demandUnits;
+    case "totalDemandPct": return e.calc.totalDemandPct;
+    case "piMixPct": return e.row.piMixPct;
+    case "grnPricePerKg": return e.row.grnPricePerKg ?? -Infinity;
+    case "grnPerUnit": return e.calc.grnPerUnit ?? -Infinity;
+    case "grnDiff": return e.calc.grnDiff ?? -Infinity;
+    case "blinkitSp": return e.row.blinkitSp ?? -Infinity;
+    case "adjustedGrn": return e.row.adjustedGrn ?? 0;
+    case "quotedPp": return e.row.quotedPp;
+    case "grnMarkup": return e.calc.grnMarkup ?? -Infinity;
+    case "negotiatedPp": return e.row.negotiatedPp;
+    case "nlc": return e.calc.nlc;
+    case "piPct": return e.calc.piPct ?? -Infinity;
+    case "gm": return e.calc.gm ?? -Infinity;
+    case "priceDeflectionPct": return e.calc.deflectionPct ?? -Infinity;
+    case "impactPpDiff": return e.calc.impactPpDiff ?? -Infinity;
+    case "impactGm": return e.calc.impactGm ?? -Infinity;
+    case "valueMix": return e.calc.valueMix ?? -Infinity;
+    case "nlcValueMix": return e.calc.nlcValueMix ?? -Infinity;
+    default: return 0;
+  }
+}
+
 function SortHeader({
   label,
   active,
@@ -510,8 +540,6 @@ export function PricingDashboard() {
   useEffect(() => {
     setSheetCreated(false);
   }, [city, deliveryDate]);
-  const [sortKey, setSortKey] = useState<string | null>(null);
-  const [sortDir, setSortDir] = useState<SortDir>(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitted, setSubmitted] = useState(false);
@@ -677,36 +705,15 @@ export function PricingDashboard() {
     });
   }, [enriched, search, lockedViolationFsnIds, lockedSubcategoryFsnIds]);
 
-  const sorted = useMemo(() => {
-    if (!sortKey || !sortDir) return filtered;
-    const get = (e: typeof enriched[number]) => {
-      switch (sortKey) {
-        case "demandUnits": return e.row.demandUnits;
-        case "totalDemandPct": return e.calc.totalDemandPct;
-        case "piMixPct": return e.row.piMixPct;
-        case "grnPricePerKg": return e.row.grnPricePerKg ?? -Infinity;
-        case "grnPerUnit": return e.calc.grnPerUnit ?? -Infinity;
-        case "blinkitSp": return e.row.blinkitSp ?? -Infinity;
-        case "adjustedGrn": return e.row.adjustedGrn ?? 0;
-        case "quotedPp": return e.row.quotedPp;
-        case "grnMarkup": return e.calc.grnMarkup ?? -Infinity;
-        case "negotiatedPp": return e.row.negotiatedPp;
-        case "nlc": return e.calc.nlc;
-        case "piPct": return e.calc.piPct ?? -Infinity;
-        case "gm": return e.calc.gm ?? -Infinity;
-        case "priceDeflectionPct": return e.calc.deflectionPct ?? -Infinity;
-        case "impactPpDiff": return e.calc.impactPpDiff ?? -Infinity;
-        case "impactGm": return e.calc.impactGm ?? -Infinity;
-        case "valueMix": return e.calc.valueMix ?? -Infinity;
-        case "nlcValueMix": return e.calc.nlcValueMix ?? -Infinity;
-        default: return 0;
-      }
-    };
-    return [...filtered].sort((a, b) => {
-      const va = get(a), vb = get(b);
-      return sortDir === "asc" ? va - vb : vb - va;
-    });
-  }, [filtered, sortKey, sortDir]);
+  const { sortKey, sortDir, toggleSort, sorted, resetSort } = useFrozenSort(
+    filtered,
+    enrichedRowKey,
+    getMainPricingSortValue,
+  );
+
+  useEffect(() => {
+    resetSort();
+  }, [city, deliveryDate, resetSort]);
 
   const averages = useMemo(() => computePriceUploadAverages(enriched), [enriched]);
 
@@ -718,11 +725,6 @@ export function PricingDashboard() {
     }
     return Array.from(new Set([...subcategoryNames, ...fromRows])).sort((a, b) => a.localeCompare(b));
   }, [subcategoryNames, rows, resolveSubcategory]);
-
-  const toggleSort = (key: string) => {
-    if (sortKey !== key) { setSortKey(key); setSortDir("asc"); return; }
-    setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-  };
 
   const updateRowLocal = (fsnId: string, patch: Partial<SkuRow>) => {
     setRows((rs) => rs.map((r) => (r.fsnId === fsnId ? { ...r, ...patch } : r)));
@@ -2118,7 +2120,7 @@ function ScrollTable({
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="GRN ₹/kg" active={sortKey==="grnPricePerKg"} dir={sortDir} onClick={() => toggleSort("grnPricePerKg")} /></th>
           <th title="Prev Day GRN ₹/unit" className={`${STICKY_COL} ${HEAD_TH} bg-card px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}><Tip text="GRN ₹/unit on day T-n-1 (previous day). Read-only."><span className="block truncate">Prev Day GRN ₹/unit</span></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="GRN ₹/unit" active={sortKey==="grnPerUnit"} dir={sortDir} onClick={() => toggleSort("grnPerUnit")} /></th>
-          <th title="GRN Diff" className={`${STICKY_COL} ${HEAD_TH} bg-card px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}><Tip text="(GRN ₹/unit + Adjusted GRN) − Prev Day GRN ₹/unit"><span className="block truncate">GRN Diff</span></Tip></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="(GRN ₹/unit + Adjusted GRN) − Prev Day GRN ₹/unit"><SortHeader align="right" label="GRN Diff" active={sortKey==="grnDiff"} dir={sortDir} onClick={() => toggleSort("grnDiff")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Adjusted GRN" active={sortKey==="adjustedGrn"} dir={sortDir} onClick={() => toggleSort("adjustedGrn")} /></th>
           {/* Benchmark Info */}
           <th className={`${STICKY_COL} ${HEAD_TH} border-l bg-card px-2`}><SortHeader align="right" label="Blinkit SP" active={sortKey==="blinkitSp"} dir={sortDir} onClick={() => toggleSort("blinkitSp")} /></th>
@@ -3705,6 +3707,27 @@ const APPROVAL_SEED: ApprovalRow[] = SEED.map((r) => {
   return base;
 });
 
+function getApprovalSortValue(e: { row: ApprovalRow; calc: ReturnType<typeof deriveRow> }, sortKey: string): number | string {
+  switch (sortKey) {
+    case "fsnId": return e.row.fsnId;
+    case "ncSkuId": return e.row.ncSkuId;
+    case "ncSkuName": return e.row.ncSkuName;
+    case "weightUnit": return e.row.weightUnit;
+    case "subcategory": return e.row.subcategory;
+    case "totalDemandPct": return e.calc.totalDemandPct;
+    case "grnPerUnit": return e.calc.grnPerUnit ?? -Infinity;
+    case "blinkitSp": return e.row.blinkitSp ?? -Infinity;
+    case "quotedPp": return e.row.quotedPp;
+    case "negotiatedPp": return e.row.negotiatedPp;
+    case "approverSuggestedPp": return e.row.approverSuggestedPp ?? -Infinity;
+    case "nlc": return e.calc.nlc;
+    case "piPct": return e.calc.piPct ?? -Infinity;
+    case "gm": return e.calc.gm ?? -Infinity;
+    case "priceDeflectionPct": return e.calc.deflectionPct ?? -Infinity;
+    default: return 0;
+  }
+}
+
 function PriceApprovalTab({
   status, setStatus, rejectionReason, setRejectionReason, statusMeta, parentDate, parentCity,
 }: {
@@ -3731,18 +3754,12 @@ function PriceApprovalTab({
   const [suggestOpen, setSuggestOpen] = useState(false);
   const [subCatOpen, setSubCatOpen] = useState(false);
   const [localReason, setLocalReason] = useState("");
-  const [sortKey, setSortKey] = useState<string | null>(null);
-  const [sortDir, setSortDir] = useState<SortDir>(null);
   const {
     width: frozenPaneWidth,
     onResizePointerDown: onFrozenResizeDown,
     onResizePointerMove: onFrozenResizeMove,
     endResize: endFrozenResize,
   } = useResizableFrozenWidth(APPROVAL_FROZEN_DEFAULT, APPROVAL_FROZEN_MIN, APPROVAL_FROZEN_MAX);
-  const toggleSort = (key: string) => {
-    if (sortKey !== key) { setSortKey(key); setSortDir("asc"); return; }
-    setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-  };
 
 
   const canFetch = !!date && !!city;
@@ -3811,40 +3828,11 @@ function PriceApprovalTab({
     });
   }, [enriched, activeFilters, piMin, piMax, deflLimit]);
 
-  const sorted = useMemo(() => {
-    if (!sortKey || !sortDir) return filtered;
-    const arr = [...filtered];
-    arr.sort((a, b) => {
-      const get = (e: typeof a): number | string => {
-        switch (sortKey) {
-          case "fsnId": return e.row.fsnId;
-          case "ncSkuId": return e.row.ncSkuId;
-          case "ncSkuName": return e.row.ncSkuName;
-          case "weightUnit": return e.row.weightUnit;
-          case "subcategory": return e.row.subcategory;
-          case "totalDemandPct": return e.calc.totalDemandPct;
-          case "grnPerUnit": return e.calc.grnPerUnit ?? -Infinity;
-          case "blinkitSp": return e.row.blinkitSp ?? -Infinity;
-          case "quotedPp": return e.row.quotedPp;
-          case "negotiatedPp": return e.row.negotiatedPp;
-          case "approverSuggestedPp": return e.row.approverSuggestedPp ?? -Infinity;
-          case "nlc": return e.calc.nlc;
-          case "piPct": return e.calc.piPct ?? -Infinity;
-          case "gm": return e.calc.gm ?? -Infinity;
-          case "priceDeflectionPct": return e.calc.deflectionPct ?? -Infinity;
-          default: return 0;
-        }
-      };
-      const va = get(a); const vb = get(b);
-      if (typeof va === "string" || typeof vb === "string") {
-        const cmp = String(va).localeCompare(String(vb));
-        return sortDir === "asc" ? cmp : -cmp;
-      }
-      return sortDir === "asc" ? (va as number) - (vb as number) : (vb as number) - (va as number);
-    });
-    return arr;
-  }, [filtered, sortKey, sortDir]);
-
+  const { sortKey, sortDir, toggleSort, sorted } = useFrozenSort(
+    filtered,
+    enrichedRowKey,
+    getApprovalSortValue,
+  );
 
   const avgs = useMemo(() => {
     const valid = (arr: (number | null)[]) => arr.filter((x): x is number => x !== null);
