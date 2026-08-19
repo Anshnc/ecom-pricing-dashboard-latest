@@ -9,15 +9,15 @@ export type RowMetricsInput = {
   t3GrnPricePerUnit?: number | null;
   adjustedGrn?: number;
   quotedPp: number;
+  /** False when DB quoted_pp is null — impact PP must show "—", not a coerced zero. */
+  quotedPpIsSet?: boolean;
   negotiatedPp: number;
   packagingCost: number;
   fmlCost: number;
   processingCost: number;
   blinkitSp: number | null;
-  /** Prior-day displayed NLC; used to compute deflection when available. */
+  /** Prior-day displayed NLC from calendar yesterday; required for deflection. */
   prevDayNlc?: number | null;
-  /** Stored DB deflection fallback when prev-day NLC is unavailable. */
-  storedDeflectionPct?: number | null;
 };
 
 export type RowMetrics = {
@@ -42,6 +42,19 @@ export function demandMixPct(demandUnits: number, totalDemand: number): number {
   return totalDemand > 0 ? (demandUnits / totalDemand) * 100 : 0;
 }
 
+/** Display NLC = negotiated PP + costs when set, else quoted PP + costs (matches NLC column). */
+export function displayNlcFromParts(
+  quotedPp: number,
+  negotiatedPp: number,
+  packagingCost: number,
+  fmlCost: number,
+  processingCost: number,
+): number {
+  const costs = packagingCost + fmlCost + processingCost;
+  const pp = negotiatedPp !== 0 ? negotiatedPp : quotedPp;
+  return pp + costs;
+}
+
 /** Quoted NLC = quoted PP + fixed cost components (matches DB trigger). */
 export function quotedNlcFromParts(
   quotedPp: number,
@@ -52,7 +65,7 @@ export function quotedNlcFromParts(
   return quotedPp + packagingCost + fmlCost + processingCost;
 }
 
-/** Resolve GRN ₹/unit — prefer GRN/kg × CF; fall back to stored unit (matches DB trigger coalesce). */
+/** Resolve GRN ₹/unit — prefer stored unit (matches DB trigger), else GRN/kg × CF, then fallbacks. */
 export function resolveGrnPerUnit(args: {
   grnPricePerKg: number | null;
   conversionFactor: number;
@@ -60,11 +73,13 @@ export function resolveGrnPerUnit(args: {
   prevGrnPricePerUnit?: number | null;
   t3GrnPricePerUnit?: number | null;
 }): number | null {
+  if (args.grnPricePerUnit != null) {
+    return args.grnPricePerUnit;
+  }
   if (args.grnPricePerKg !== null) {
     return args.grnPricePerKg * args.conversionFactor;
   }
   return (
-    args.grnPricePerUnit ??
     args.prevGrnPricePerUnit ??
     args.t3GrnPricePerUnit ??
     null
@@ -75,6 +90,22 @@ export function resolveGrnPerUnit(args: {
 export function deflectionPctFromNlc(currentNlc: number, prevNlc: number | null | undefined): number | null {
   if (prevNlc == null || prevNlc === 0) return null;
   return ((currentNlc - prevNlc) / prevNlc) * 100;
+}
+
+/** Impact PP Diff = (Quoted PP − GRN ₹/unit) × Total Demand %. */
+export function impactPpDiffFromParts(
+  quotedPp: number | null | undefined,
+  grnPerUnit: number | null,
+  mixPct: number,
+): number | null {
+  if (quotedPp == null || grnPerUnit == null) return null;
+  return (quotedPp - grnPerUnit) * (mixPct / 100);
+}
+
+/** Impact GM = GM × Total Demand %. */
+export function impactGmFromParts(gm: number | null, mixPct: number): number | null {
+  if (gm == null) return null;
+  return gm * (mixPct / 100);
 }
 
 export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): RowMetrics {
@@ -94,23 +125,29 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
       : null;
 
   const quotedNlc = quotedNlcFromParts(row.quotedPp, row.packagingCost, row.fmlCost, row.processingCost);
-  const nlc = row.negotiatedPp + row.packagingCost + row.fmlCost + row.processingCost;
+  const nlc = displayNlcFromParts(
+    row.quotedPp,
+    row.negotiatedPp,
+    row.packagingCost,
+    row.fmlCost,
+    row.processingCost,
+  );
   const piPct = row.blinkitSp ? ((row.blinkitSp - nlc) / row.blinkitSp) * 100 : null;
   const gm = grnPerUnit !== null ? nlc - grnPerUnit : null;
   const mixPct = demandMixPct(row.demandUnits, totalDemand);
+  const quotedForImpact = row.quotedPpIsSet === false ? null : row.quotedPp;
 
-  // Impact PP = (Quoted PP − GRN ₹/unit) × Total Demand %
-  const impactPpDiff =
-    grnPerUnit !== null ? (row.quotedPp - grnPerUnit) * (mixPct / 100) : null;
+  // Impact PP = (Quoted PP − GRN ₹/unit) × Total Demand % — formula only.
+  const impactPpDiff = impactPpDiffFromParts(quotedForImpact, grnPerUnit, mixPct);
 
-  // Impact GM = GM × Total Demand %, where GM = NLC − GRN ₹/unit (displayed NLC column).
-  const impactGm = gm !== null ? gm * (mixPct / 100) : null;
+  // Impact GM = GM × Total Demand % — formula only.
+  const impactGm = impactGmFromParts(gm, mixPct);
 
-  // Deflection = ((today NLC − prev NLC) / prev NLC) × 100 using displayed NLC.
+  // Deflection = ((today NLC − yesterday NLC) / yesterday NLC) × 100 — formula only, no DB fallback.
   const deflectionPct =
     row.prevDayNlc != null && row.prevDayNlc !== 0
       ? deflectionPctFromNlc(nlc, row.prevDayNlc)
-      : row.storedDeflectionPct ?? null;
+      : null;
 
   const valueMix = row.blinkitSp !== null ? row.blinkitSp * row.demandUnits : null;
   // NLC Value Mix = quoted NLC × demand (matches working-sheet "NLC" column × demand units).

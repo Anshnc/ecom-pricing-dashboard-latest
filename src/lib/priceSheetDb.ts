@@ -59,50 +59,45 @@ export type PriorNlcLookup = {
 };
 
 /**
- * Most recent prior displayed NLC per (fsn + weight_unit) and per fsn (any weight unit).
- * Scans all sheets before deliveryDate — not only calendar yesterday.
+ * Prior-day displayed NLC from **calendar yesterday's sheet only** (city + delivery_date − 1).
+ * If yesterday's sheet does not exist, returns empty lookups → deflection shows "—".
  */
-export async function fetchPriorNlcLookup(city: string, deliveryDate: string): Promise<PriorNlcLookup> {
+export async function fetchCalendarPrevDayNlcLookup(
+  city: string,
+  deliveryDate: string,
+): Promise<PriorNlcLookup> {
   const empty = { byLineKey: new Map<string, number>(), byFsn: new Map<string, number>() };
 
-  const { data: headers, error: headerErr } = await supabase
-    .from("price_sheet")
-    .select("price_sheet_id, delivery_date")
-    .eq("city", city)
-    .lt("delivery_date", deliveryDate)
-    .order("delivery_date", { ascending: false });
-  if (headerErr || !headers?.length) return empty;
-
-  const dateBySheet = new Map(headers.map((h) => [h.price_sheet_id, h.delivery_date as string]));
-  const sheetIds = headers.map((h) => h.price_sheet_id);
+  const prevDate = addDaysISO(deliveryDate, -1);
+  const prevHeader = await fetchPriceSheetHeader(city, prevDate);
+  if (!prevHeader) return empty;
 
   const { data: details, error: detailErr } = await supabase
     .from("price_sheet_details")
-    .select("fsn_id, weight_unit, quoted_pp, negotiated_pp, nlc, nlc_negotiated, pm_cost, fml_dump, pc, price_sheet_id")
-    .in("price_sheet_id", sheetIds)
-    .limit(20000);
+    .select("fsn_id, weight_unit, quoted_pp, negotiated_pp, nlc, nlc_negotiated, pm_cost, fml_dump, pc")
+    .eq("price_sheet_id", prevHeader.price_sheet_id)
+    .limit(5000);
   if (detailErr || !details?.length) return empty;
-
-  const sorted = [...details].sort((a, b) => {
-    const da = dateBySheet.get(a.price_sheet_id!) ?? "";
-    const db = dateBySheet.get(b.price_sheet_id!) ?? "";
-    return db.localeCompare(da);
-  });
 
   const byLineKey = new Map<string, number>();
   const byFsn = new Map<string, number>();
 
-  for (const d of sorted) {
+  for (const d of details) {
     const nlc = displayNlcFromDetailRow(d as PriceSheetDetailRow);
     if (nlc == null || nlc === 0) continue;
     const fsn = String(d.fsn_id ?? "").trim();
     if (!fsn) continue;
     const lineKey = detailLineKey(fsn, d.weight_unit);
-    if (!byLineKey.has(lineKey)) byLineKey.set(lineKey, nlc);
+    byLineKey.set(lineKey, nlc);
     if (!byFsn.has(fsn)) byFsn.set(fsn, nlc);
   }
 
   return { byLineKey, byFsn };
+}
+
+/** @deprecated Use fetchCalendarPrevDayNlcLookup — kept as alias for callers. */
+export async function fetchPriorNlcLookup(city: string, deliveryDate: string): Promise<PriorNlcLookup> {
+  return fetchCalendarPrevDayNlcLookup(city, deliveryDate);
 }
 
 function resolvePrevDayNlc(
@@ -201,14 +196,14 @@ async function fetchPreviousDayDetails(city: string, deliveryDate: string): Prom
   return (data ?? []) as PriceSheetDetailRow[];
 }
 
-/** Attach most recent prior displayed NLC for client-side deflection. */
+/** Attach calendar-yesterday displayed NLC for client-side deflection. */
 export async function enrichRowsWithPreviousDayNlc<T extends PricingSheetRow>(
   rows: T[],
   city: string,
   deliveryDate: string,
 ): Promise<(T & { prev_day_nlc?: number | null })[]> {
   if (rows.length === 0) return rows;
-  const lookup = await fetchPriorNlcLookup(city, deliveryDate);
+  const lookup = await fetchCalendarPrevDayNlcLookup(city, deliveryDate);
   if (lookup.byLineKey.size === 0 && lookup.byFsn.size === 0) return rows;
 
   return rows.map((r) => ({

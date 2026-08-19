@@ -1,5 +1,10 @@
 import { fetchPriceSheetHeader, fetchPriceSheetDetails, mergeHeaderAndDetails } from "@/lib/priceSheetDb";
-import { resolveGrnPerUnit } from "@/lib/pricingMetrics";
+import {
+  displayNlcFromParts,
+  impactGmFromParts,
+  impactPpDiffFromParts,
+  resolveGrnPerUnit,
+} from "@/lib/pricingMetrics";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
 
 /**
@@ -248,8 +253,10 @@ export function computeClientCascadeFields(args: {
   const costs = pmCost + fmlDump + pc;
   const nlcQuoted = quotedPp !== null ? quotedPp + costs : null;
   const nlcNegotiated = negotiatedPp !== null ? negotiatedPp + costs : null;
-  // Sheet NLC follows negotiated when present; otherwise quoted (same as UI when negotiated is set).
-  const nlc = nlcNegotiated ?? nlcQuoted;
+  const nlc =
+    quotedPp !== null || negotiatedPp !== null
+      ? displayNlcFromParts(quotedPp ?? 0, negotiatedPp ?? 0, pmCost, fmlDump, pc)
+      : null;
 
   const piQuoted =
     blinkitSp && nlcQuoted !== null ? ((blinkitSp - nlcQuoted) / blinkitSp) * 100 : null;
@@ -258,11 +265,8 @@ export function computeClientCascadeFields(args: {
   const piPct = piNegotiated ?? piQuoted;
 
   const gm = grnPerUnit !== null && nlc !== null ? nlc - grnPerUnit : null;
-  const impactPpDiff =
-    grnPerUnit !== null && quotedPp !== null
-      ? (quotedPp - grnPerUnit) * (demandPct / 100)
-      : null;
-  const impactGm = gm !== null ? gm * (demandPct / 100) : null;
+  const impactPpDiff = impactPpDiffFromParts(quotedPp, grnPerUnit, demandPct);
+  const impactGm = impactGmFromParts(gm, demandPct);
   const bkValueMix = blinkitSp !== null ? blinkitSp * demandUnits : null;
 
   return {

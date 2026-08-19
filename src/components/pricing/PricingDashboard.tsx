@@ -144,6 +144,7 @@ type SkuRow = {
   adjustedGrnLocked?: boolean;
   wspTrend?: "up" | "down" | "flat";
   quotedPp: number;
+  quotedPpIsSet?: boolean;
   quotedLocked: boolean;
   quotedTouched: boolean;
   negotiatedPp: number;
@@ -244,6 +245,7 @@ function dbToSku(r: PricingSheetRow): SkuRow {
     adjustedGrnLocked: true,
     wspTrend: "flat",
     quotedPp: r.quoted_pp ?? 0,
+    quotedPpIsSet: r.quoted_pp != null,
     quotedLocked: true,
     quotedTouched: false,
     negotiatedPp:
@@ -279,13 +281,13 @@ function deriveRow(r: SkuRow, totalDemand: number) {
       prevDayGrnPerUnit: r.prevDayGrnPerUnit,
       adjustedGrn: r.adjustedGrn,
       quotedPp: r.quotedPp,
+      quotedPpIsSet: r.quotedPpIsSet,
       negotiatedPp: r.negotiatedPp,
       packagingCost: r.packagingCost,
       fmlCost: r.fmlCost,
       processingCost: r.processingCost,
       blinkitSp: r.blinkitSp,
       prevDayNlc: r.prevDayNlc,
-      storedDeflectionPct: r.priceDeflectionPct,
     },
     totalDemand,
   );
@@ -373,7 +375,8 @@ function computePriceUploadAverages(enriched: Enriched[]) {
     impactPpDiff: plainSum(enriched, (e) => e.calc.impactPpDiff),
     impactGm: plainSum(enriched, (e) => e.calc.impactGm),
     valueMix: weightedByDemandPct(enriched, (e) => e.calc.valueMix),
-    gm: wNlc !== null && wGrnPerUnit !== null ? wNlc - wGrnPerUnit : null,
+    // Demand-weighted avg of row GM — not (avg NLC − avg GRN), which skews when GRN is missing on some rows.
+    gm: weightedByDemandPct(enriched, (e) => e.calc.gm),
     nlcValueMix: plainSum(enriched, (e) => e.calc.nlcValueMix),
     grnDiff: weightedByDemandPct(enriched, (e) => e.calc.grnDiff),
     adjustedGrn: weightedByDemandPct(enriched, (e) => e.row.adjustedGrn ?? 0),
