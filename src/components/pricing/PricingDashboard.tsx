@@ -132,6 +132,8 @@ type SkuRow = {
   demandUnits: number;
   piMixPct: number;
   grnPricePerKg: number | null;
+  grnPricePerUnit?: number | null;
+  t3GrnPricePerUnit?: number | null;
   prevDayGrnPerKg?: number | null;
   prevDayGrnPerUnit?: number | null;
   grnLocked?: boolean;
@@ -230,6 +232,8 @@ function dbToSku(r: PricingSheetRow): SkuRow {
     demandUnits: r.demand_units ?? 0,
     piMixPct: r.demand_pct ?? 0,
     grnPricePerKg: r.grn_price_per_kg,
+    grnPricePerUnit: r.grn_price_per_unit,
+    t3GrnPricePerUnit: r.t3_grn_price_per_unit,
     prevDayGrnPerKg: r.prev_grn_price_per_kg,
     prevDayGrnPerUnit: r.prev_grn_price_per_unit,
     grnLocked: true,
@@ -270,6 +274,8 @@ function deriveRow(r: SkuRow, totalDemand: number) {
       demandUnits: r.demandUnits,
       conversionFactor: r.conversionFactor,
       grnPricePerKg: r.grnPricePerKg,
+      grnPricePerUnit: r.grnPricePerUnit,
+      t3GrnPricePerUnit: r.t3GrnPricePerUnit,
       prevDayGrnPerUnit: r.prevDayGrnPerUnit,
       adjustedGrn: r.adjustedGrn,
       quotedPp: r.quotedPp,

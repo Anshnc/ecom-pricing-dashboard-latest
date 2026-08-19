@@ -38,11 +38,19 @@ function detailLineKey(fsnId: string | null | undefined, weightUnit: string | nu
   return `${fsnId ?? ""}||${weightUnit ?? ""}`;
 }
 
-/** Quoted NLC from a detail row (stored nlc or quoted_pp + cost components). */
-function quotedNlcFromDetailRow(d: Pick<PriceSheetDetailRow, "nlc" | "quoted_pp" | "pm_cost" | "fml_dump" | "pc">): number | null {
+/** Display NLC from a detail row — prefers negotiated, then quoted (matches UI NLC column). */
+function displayNlcFromDetailRow(
+  d: Pick<
+    PriceSheetDetailRow,
+    "nlc" | "nlc_negotiated" | "quoted_pp" | "negotiated_pp" | "pm_cost" | "fml_dump" | "pc"
+  >,
+): number | null {
+  if (d.nlc_negotiated != null && d.nlc_negotiated !== 0) return d.nlc_negotiated;
+  const costs = (d.pm_cost ?? 0) + (d.fml_dump ?? 0) + (d.pc ?? 0);
+  if (d.negotiated_pp != null && d.negotiated_pp !== 0) return d.negotiated_pp + costs;
   if (d.nlc != null && d.nlc !== 0) return d.nlc;
   if (d.quoted_pp == null) return null;
-  return d.quoted_pp + (d.pm_cost ?? 0) + (d.fml_dump ?? 0) + (d.pc ?? 0);
+  return d.quoted_pp + costs;
 }
 
 export type PriorNlcLookup = {
@@ -51,7 +59,7 @@ export type PriorNlcLookup = {
 };
 
 /**
- * Most recent prior quoted NLC per (fsn + weight_unit) and per fsn (any weight unit).
+ * Most recent prior displayed NLC per (fsn + weight_unit) and per fsn (any weight unit).
  * Scans all sheets before deliveryDate — not only calendar yesterday.
  */
 export async function fetchPriorNlcLookup(city: string, deliveryDate: string): Promise<PriorNlcLookup> {
@@ -70,7 +78,7 @@ export async function fetchPriorNlcLookup(city: string, deliveryDate: string): P
 
   const { data: details, error: detailErr } = await supabase
     .from("price_sheet_details")
-    .select("fsn_id, weight_unit, quoted_pp, nlc, pm_cost, fml_dump, pc, price_sheet_id")
+    .select("fsn_id, weight_unit, quoted_pp, negotiated_pp, nlc, nlc_negotiated, pm_cost, fml_dump, pc, price_sheet_id")
     .in("price_sheet_id", sheetIds)
     .limit(20000);
   if (detailErr || !details?.length) return empty;
@@ -85,7 +93,7 @@ export async function fetchPriorNlcLookup(city: string, deliveryDate: string): P
   const byFsn = new Map<string, number>();
 
   for (const d of sorted) {
-    const nlc = quotedNlcFromDetailRow(d as PriceSheetDetailRow);
+    const nlc = displayNlcFromDetailRow(d as PriceSheetDetailRow);
     if (nlc == null || nlc === 0) continue;
     const fsn = String(d.fsn_id ?? "").trim();
     if (!fsn) continue;
@@ -193,7 +201,7 @@ async function fetchPreviousDayDetails(city: string, deliveryDate: string): Prom
   return (data ?? []) as PriceSheetDetailRow[];
 }
 
-/** Attach most recent prior quoted NLC for client-side deflection. */
+/** Attach most recent prior displayed NLC for client-side deflection. */
 export async function enrichRowsWithPreviousDayNlc<T extends PricingSheetRow>(
   rows: T[],
   city: string,

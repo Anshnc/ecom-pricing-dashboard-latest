@@ -1,4 +1,5 @@
 import { fetchPriceSheetHeader, fetchPriceSheetDetails, mergeHeaderAndDetails } from "@/lib/priceSheetDb";
+import { resolveGrnPerUnit } from "@/lib/pricingMetrics";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
 
 /**
@@ -200,6 +201,8 @@ export function pickAuditColumns(
  */
 export function computeClientCascadeFields(args: {
   grnPricePerKg: number | null;
+  grnPricePerUnit?: number | null;
+  t3GrnPricePerUnit?: number | null;
   cf: number;
   adjustedGrn: number;
   blinkitSp: number | null;
@@ -215,6 +218,8 @@ export function computeClientCascadeFields(args: {
 }): Partial<Pick<PricingSheetRow, AuditValueColumn>> {
   const {
     grnPricePerKg,
+    grnPricePerUnit,
+    t3GrnPricePerUnit,
     cf,
     adjustedGrn,
     blinkitSp,
@@ -229,7 +234,13 @@ export function computeClientCascadeFields(args: {
     deflectionPct,
   } = args;
 
-  const grnPerUnit = grnPricePerKg !== null ? grnPricePerKg * cf : null;
+  const grnPerUnit = resolveGrnPerUnit({
+    grnPricePerKg,
+    conversionFactor: cf,
+    grnPricePerUnit,
+    prevGrnPricePerUnit: prevGrnPerUnit,
+    t3GrnPricePerUnit,
+  });
   const effectiveGrn = grnPerUnit !== null ? grnPerUnit + adjustedGrn : null;
   const grnDiff =
     effectiveGrn !== null && prevGrnPerUnit !== null ? effectiveGrn - prevGrnPerUnit : null;
@@ -251,10 +262,7 @@ export function computeClientCascadeFields(args: {
     grnPerUnit !== null && quotedPp !== null
       ? (quotedPp - grnPerUnit) * (demandPct / 100)
       : null;
-  const impactGmBase =
-    grnPerUnit !== null && nlcQuoted !== null ? nlcQuoted - grnPerUnit : null;
-  const impactGm =
-    impactGmBase !== null ? impactGmBase * (demandPct / 100) : null;
+  const impactGm = gm !== null ? gm * (demandPct / 100) : null;
   const bkValueMix = blinkitSp !== null ? blinkitSp * demandUnits : null;
 
   return {
@@ -290,6 +298,8 @@ export function buildExhaustiveAuditSnapshot(
   const merged: Partial<PricingSheetRow> = { ...(dbRow ?? {}), ...(overlay ?? {}) };
   const cascade = computeClientCascadeFields({
     grnPricePerKg: merged.grn_price_per_kg ?? null,
+    grnPricePerUnit: merged.grn_price_per_unit ?? null,
+    t3GrnPricePerUnit: merged.t3_grn_price_per_unit ?? null,
     cf: merged.cf ?? 1,
     adjustedGrn: merged.adjusted_grn ?? 0,
     blinkitSp: merged.blinkit_sp ?? null,
