@@ -137,6 +137,47 @@ export function negotiatedPpIsPresent(negotiatedPp: number, negotiatedPpIsSet?: 
 }
 
 /**
+ * Displayed NLC is present when Quoted PP or Negotiated PP was actually entered.
+ * 0 PP is treated as not entered (same as a blank). Missing both → NLC is not present.
+ */
+export function displayNlcIsPresent(row: {
+  quotedPp?: number;
+  quotedPpIsSet?: boolean;
+  negotiatedPp: number;
+  negotiatedPpIsSet?: boolean;
+}): boolean {
+  const quotedEntered = row.quotedPp != null && row.quotedPp !== 0;
+  if (quotedEntered) return true;
+  return negotiatedPpIsPresent(row.negotiatedPp, row.negotiatedPpIsSet);
+}
+
+/**
+ * Price Upload Blinkit SP average: simple mean of SP on rows where
+ * Blinkit SP and displayed NLC are both present. Denominator is that paired count only.
+ * 0 is a real Blinkit SP; blank/NA SP or missing NLC is skipped.
+ */
+export function meanBlinkitSpWhenBothPresent(
+  rows: Array<{
+    blinkitSp: number | null | undefined;
+    quotedPp?: number;
+    quotedPpIsSet?: boolean;
+    negotiatedPp: number;
+    negotiatedPpIsSet?: boolean;
+  }>,
+): number | null {
+  let sum = 0;
+  let n = 0;
+  for (const r of rows) {
+    if (!displayNlcIsPresent(r)) continue;
+    const sp = r.blinkitSp;
+    if (sp === null || sp === undefined || Number.isNaN(sp)) continue;
+    sum += sp;
+    n += 1;
+  }
+  return n > 0 ? sum / n : null;
+}
+
+/**
  * PI% = (Blinkit SP − Negotiated NLC) / Blinkit SP × 100.
  * Blank when Blinkit SP or Negotiated PP is missing (do not fall back to quoted NLC).
  */
@@ -146,6 +187,42 @@ export function piPctFromNegotiatedNlc(
 ): number | null {
   if (blinkitSp == null || blinkitSp === 0 || negotiatedNlc == null) return null;
   return ((blinkitSp - negotiatedNlc) / blinkitSp) * 100;
+}
+
+/**
+ * Row PI% = (BK SP − displayed NLC) / BK SP × 100.
+ * Blank when BK SP is missing/zero (not sold on Blinkit) or NLC is missing.
+ */
+export function piPctFromDisplayNlc(
+  blinkitSp: number | null,
+  nlc: number | null,
+): number | null {
+  if (blinkitSp == null || blinkitSp === 0 || nlc == null) return null;
+  return ((blinkitSp - nlc) / blinkitSp) * 100;
+}
+
+/**
+ * Price Upload PI% average:
+ * ((Σ demand × BK SP) − (Σ demand × NLC)) / (Σ demand × BK SP) × 100
+ * Rows missing Blinkit SP or NLC are excluded from all three sums.
+ */
+export function basketPiPctAvg(
+  rows: Array<{
+    demandUnits: number;
+    blinkitSp: number | null | undefined;
+    nlc: number | null;
+  }>,
+): number | null {
+  let bkValue = 0;
+  let nlcValue = 0;
+  for (const r of rows) {
+    const sp = r.blinkitSp;
+    if (sp == null || Number.isNaN(sp) || sp === 0 || r.nlc == null) continue;
+    bkValue += r.demandUnits * sp;
+    nlcValue += r.demandUnits * r.nlc;
+  }
+  if (bkValue === 0) return null;
+  return ((bkValue - nlcValue) / bkValue) * 100;
 }
 
 /** Simple mean of numeric values; skips null, undefined, and NaN (NA / blanks). */
@@ -187,11 +264,8 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
     row.fmlCost,
     row.processingCost,
   );
-  const negotiatedSet = negotiatedPpIsPresent(row.negotiatedPp, row.negotiatedPpIsSet);
-  const negotiatedNlc = negotiatedSet
-    ? row.negotiatedPp + row.packagingCost + row.fmlCost + row.processingCost
-    : null;
-  const piPct = piPctFromNegotiatedNlc(row.blinkitSp, negotiatedNlc);
+  const nlcForPi = displayNlcIsPresent(row) ? nlc : null;
+  const piPct = piPctFromDisplayNlc(row.blinkitSp, nlcForPi);
   const gm = totalGrnPerUnit !== null ? nlc - totalGrnPerUnit : null;
   const mixPct = demandMixPct(row.demandUnits, totalDemand);
   const quotedForImpact = row.quotedPpIsSet === false ? null : row.quotedPp;

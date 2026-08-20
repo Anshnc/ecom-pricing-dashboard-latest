@@ -1,10 +1,13 @@
 import {
+  basketPiPctAvg,
   computeRowMetrics,
   deflectionPctFromNlc,
   demandMixPct,
+  displayNlcIsPresent,
   impactGmFromParts,
   impactPpDiffFromParts,
-  piPctFromNegotiatedNlc,
+  meanBlinkitSpWhenBothPresent,
+  piPctFromDisplayNlc,
   resolveGrnPerUnit,
   simpleMean,
   totalGrnPerUnitFromParts,
@@ -62,7 +65,7 @@ assertClose(
   deflectionPctFromNlc(32, 30),
   "Deflection",
 );
-assertClose(calc.piPct, piPctFromNegotiatedNlc(50, 32), "PI% negotiated NLC");
+assertClose(calc.piPct, piPctFromDisplayNlc(50, 32), "PI% displayed NLC");
 assertClose(calc.valueMix, 50 * 1_000, "BK Value Mix");
 
 // Missing GRN/kg should fall back to stored unit (common Aug sheet case).
@@ -113,10 +116,13 @@ const noKg = computeRowMetrics({ ...row, grnPricePerKg: null }, totalDemand);
 assertClose(noKg.totalGrnPerUnit, null, "Total GRN/unit without GRN/kg");
 assertClose(noKg.gm, null, "GM without GRN/kg");
 
-// PI% is blank when Negotiated PP was never set (even if UI copied Quoted PP into the field).
+// PI% uses displayed NLC; still calculated when Negotiated PP was never set.
 const noNeg = computeRowMetrics({ ...row, negotiatedPpIsSet: false }, totalDemand);
-assertClose(noNeg.piPct, null, "PI% without negotiated PP");
+assertClose(noNeg.piPct, piPctFromDisplayNlc(50, 32), "PI% without negotiated PP still uses displayed NLC");
 assertClose(noNeg.nlc, 32, "NLC still uses the displayed PP path");
+
+const noSp = computeRowMetrics({ ...row, blinkitSp: null }, totalDemand);
+assertClose(noSp.piPct, null, "PI% blank when Blinkit SP is missing");
 
 // Simple mean of Blinkit SP / PI% / BK mix skips NA/blanks.
 assertClose(simpleMean([50, 150, null]), 100, "Blinkit SP simple mean skips blank");
@@ -124,5 +130,65 @@ assertClose(simpleMean([10, 20, null]), 15, "PI% simple mean skips blank");
 assertClose(simpleMean([5000, 120000, null]), 62500, "BK Value Mix simple mean skips blank");
 assertClose(simpleMean([null, undefined, Number.NaN]), null, "All-blank average is null");
 assertClose(simpleMean([0, 10]), 5, "Zero is data, not blank");
+
+function assertTrue(actual: boolean, label: string) {
+  if (!actual) throw new Error(`${label}: expected true, got ${actual}`);
+}
+function assertFalse(actual: boolean, label: string) {
+  if (actual) throw new Error(`${label}: expected false, got ${actual}`);
+}
+
+assertTrue(displayNlcIsPresent({ quotedPp: 30, quotedPpIsSet: true, negotiatedPp: 0, negotiatedPpIsSet: false }), "NLC present when Quoted PP is set");
+assertTrue(displayNlcIsPresent({ quotedPp: 0, quotedPpIsSet: false, negotiatedPp: 28, negotiatedPpIsSet: true }), "NLC present when only Negotiated PP is set");
+assertFalse(displayNlcIsPresent({ quotedPp: 0, quotedPpIsSet: false, negotiatedPp: 0, negotiatedPpIsSet: false }), "NLC absent when neither PP is entered");
+assertFalse(displayNlcIsPresent({ quotedPp: 0, quotedPpIsSet: true, negotiatedPp: 0, negotiatedPpIsSet: false }), "Quoted PP of 0 is not NLC");
+
+// Count / denominator is only rows where NLC and Blinkit SP are both present.
+assertClose(
+  meanBlinkitSpWhenBothPresent([
+    { blinkitSp: 50, quotedPp: 30, quotedPpIsSet: true, negotiatedPp: 28, negotiatedPpIsSet: true },
+    { blinkitSp: 150, quotedPp: 0, quotedPpIsSet: false, negotiatedPp: 0, negotiatedPpIsSet: false },
+    { blinkitSp: null, quotedPp: 40, quotedPpIsSet: true, negotiatedPp: 40, negotiatedPpIsSet: true },
+    { blinkitSp: 100, quotedPp: 20, quotedPpIsSet: true, negotiatedPp: 20, negotiatedPpIsSet: true },
+    { blinkitSp: 0, quotedPp: 10, quotedPpIsSet: true, negotiatedPp: 10, negotiatedPpIsSet: true },
+  ]),
+  50,
+  "Blinkit SP average counts only paired NLC+SP rows; 0 SP still counts",
+);
+assertClose(
+  meanBlinkitSpWhenBothPresent([
+    { blinkitSp: 80, quotedPp: 0, quotedPpIsSet: false, negotiatedPp: 0, negotiatedPpIsSet: false },
+    { blinkitSp: null, quotedPp: 40, quotedPpIsSet: true, negotiatedPp: 40, negotiatedPpIsSet: true },
+  ]),
+  null,
+  "Blinkit SP average is null when no paired NLC+SP rows",
+);
+
+// PI% average = ((Σ demand×BK SP) − (Σ demand×NLC)) / (Σ demand×BK SP) × 100
+assertClose(
+  basketPiPctAvg([
+    { demandUnits: 10, blinkitSp: 50, nlc: 30 },
+    { demandUnits: 20, blinkitSp: 80, nlc: 40 },
+    { demandUnits: 100, blinkitSp: null, nlc: 10 },
+  ]),
+  ((10 * 50 + 20 * 80) - (10 * 30 + 20 * 40)) / (10 * 50 + 20 * 80) * 100,
+  "PI% avg uses demand×SP and demand×NLC; missing BK SP excluded",
+);
+assertClose(
+  basketPiPctAvg([
+    { demandUnits: 10, blinkitSp: 50, nlc: 30 },
+    { demandUnits: 20, blinkitSp: 80, nlc: null },
+  ]),
+  ((10 * 50) - (10 * 30)) / (10 * 50) * 100,
+  "PI% avg excludes rows missing NLC",
+);
+assertClose(
+  basketPiPctAvg([
+    { demandUnits: 10, blinkitSp: null, nlc: 30 },
+    { demandUnits: 20, blinkitSp: 0, nlc: 40 },
+  ]),
+  null,
+  "PI% avg is null when no BK SP value to divide by",
+);
 
 console.log("pricingMetrics.test.ts — all assertions passed");

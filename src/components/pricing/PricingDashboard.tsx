@@ -49,7 +49,13 @@ import {
 } from "lucide-react";
 import { formatLocalISO, loadPricingSheetDemand, todayISO, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
 import { useFrozenSort, type SortDir } from "@/hooks/useFrozenSort";
-import { computeRowMetrics, simpleMean } from "@/lib/pricingMetrics";
+import {
+  basketPiPctAvg,
+  computeRowMetrics,
+  displayNlcIsPresent,
+  meanBlinkitSpWhenBothPresent,
+  simpleMean,
+} from "@/lib/pricingMetrics";
 import { upsertFsnCostComponentsFromCsv, fetchFsnCostComponentsByFsns, parseFsnCostCsvRows } from "@/lib/skuCostComponents";
 import { RaasCheckTab } from "@/components/pricing/RaasCheckTab";
 import { RowAuditExpandButton } from "@/components/pricing/RowAuditHistoryButton";
@@ -372,9 +378,17 @@ function computePriceUploadAverages(enriched: Enriched[]) {
     grnPerUnit: wGrnPerUnit,
     prevDayGrnPerKg: weightedByDemandPct(enriched, (e) => e.row.prevDayGrnPerKg ?? null),
     prevDayGrnPerUnit: weightedByDemandPct(enriched, (e) => e.calc.prevDayGrnPerUnit),
-    blinkitSp: simpleMean(enriched.map((e) => e.row.blinkitSp)),
+    // Simple mean of Blinkit SP; count is only rows where NLC and Blinkit SP are both present.
+    blinkitSp: meanBlinkitSpWhenBothPresent(enriched.map((e) => e.row)),
     nlc: wNlc,
-    piPct: simpleMean(enriched.map((e) => e.calc.piPct)),
+    // ((Σ demand×BK SP) − (Σ demand×NLC)) / (Σ demand×BK SP) × 100
+    piPct: basketPiPctAvg(
+      enriched.map((e) => ({
+        demandUnits: e.row.demandUnits,
+        blinkitSp: e.row.blinkitSp,
+        nlc: displayNlcIsPresent(e.row) ? e.calc.nlc : null,
+      })),
+    ),
     priceDeflectionPct: weightedByDemandPct(enriched, (e) => e.calc.deflectionPct),
     impactPpDiff: plainSum(enriched, (e) => e.calc.impactPpDiff),
     impactGm: plainSum(enriched, (e) => e.calc.impactGm),
