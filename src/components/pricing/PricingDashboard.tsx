@@ -49,7 +49,7 @@ import {
 } from "lucide-react";
 import { formatLocalISO, loadPricingSheetDemand, todayISO, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
 import { useFrozenSort, type SortDir } from "@/hooks/useFrozenSort";
-import { computeRowMetrics } from "@/lib/pricingMetrics";
+import { computeRowMetrics, simpleMean } from "@/lib/pricingMetrics";
 import { upsertFsnCostComponentsFromCsv, fetchFsnCostComponentsByFsns, parseFsnCostCsvRows } from "@/lib/skuCostComponents";
 import { RaasCheckTab } from "@/components/pricing/RaasCheckTab";
 import { RowAuditExpandButton } from "@/components/pricing/RowAuditHistoryButton";
@@ -148,6 +148,8 @@ type SkuRow = {
   quotedLocked: boolean;
   quotedTouched: boolean;
   negotiatedPp: number;
+  /** True only when DB negotiated_pp is present (not copied from quoted). */
+  negotiatedPpIsSet?: boolean;
   negotiatedLocked: boolean;
   negotiatedTouched: boolean;
   lastLockedNegotiated: number;
@@ -252,6 +254,7 @@ function dbToSku(r: PricingSheetRow): SkuRow {
       r.negotiated_pp != null && r.negotiated_pp !== 0
         ? r.negotiated_pp
         : (r.quoted_pp ?? 0),
+    negotiatedPpIsSet: r.negotiated_pp != null && r.negotiated_pp !== 0,
     negotiatedLocked: true,
     negotiatedTouched: false,
     lastLockedNegotiated:
@@ -283,6 +286,7 @@ function deriveRow(r: SkuRow, totalDemand: number) {
       quotedPp: r.quotedPp,
       quotedPpIsSet: r.quotedPpIsSet,
       negotiatedPp: r.negotiatedPp,
+      negotiatedPpIsSet: r.negotiatedPpIsSet,
       packagingCost: r.packagingCost,
       fmlCost: r.fmlCost,
       processingCost: r.processingCost,
@@ -368,18 +372,19 @@ function computePriceUploadAverages(enriched: Enriched[]) {
     grnPerUnit: wGrnPerUnit,
     prevDayGrnPerKg: weightedByDemandPct(enriched, (e) => e.row.prevDayGrnPerKg ?? null),
     prevDayGrnPerUnit: weightedByDemandPct(enriched, (e) => e.calc.prevDayGrnPerUnit),
-    blinkitSp: weightedByDemandPct(enriched, (e) => e.row.blinkitSp),
+    blinkitSp: simpleMean(enriched.map((e) => e.row.blinkitSp)),
     nlc: wNlc,
-    piPct: weightedByDemandPct(enriched, (e) => e.calc.piPct),
+    piPct: simpleMean(enriched.map((e) => e.calc.piPct)),
     priceDeflectionPct: weightedByDemandPct(enriched, (e) => e.calc.deflectionPct),
     impactPpDiff: plainSum(enriched, (e) => e.calc.impactPpDiff),
     impactGm: plainSum(enriched, (e) => e.calc.impactGm),
-    valueMix: weightedByDemandPct(enriched, (e) => e.calc.valueMix),
+    valueMix: simpleMean(enriched.map((e) => e.calc.valueMix)),
     // Demand-weighted avg of row GM — not (avg NLC − avg GRN), which skews when GRN is missing on some rows.
     gm: weightedByDemandPct(enriched, (e) => e.calc.gm),
     nlcValueMix: plainSum(enriched, (e) => e.calc.nlcValueMix),
     grnDiff: weightedByDemandPct(enriched, (e) => e.calc.grnDiff),
     adjustedGrn: weightedByDemandPct(enriched, (e) => e.row.adjustedGrn ?? 0),
+    totalGrnPerUnit: weightedByDemandPct(enriched, (e) => e.calc.totalGrnPerUnit),
     quotedPp: weightedByDemandPct(enriched, (e) => e.row.quotedPp),
     negotiatedPp: weightedByDemandPct(enriched, (e) => e.row.negotiatedPp),
     suggestedPp: weightedByDemandPct(enriched, (e) => e.row.suggestedPp),
@@ -417,6 +422,7 @@ function getMainPricingSortValue(e: { row: SkuRow; calc: ReturnType<typeof deriv
     case "grnDiff": return e.calc.grnDiff ?? -Infinity;
     case "blinkitSp": return e.row.blinkitSp ?? -Infinity;
     case "adjustedGrn": return e.row.adjustedGrn ?? 0;
+    case "totalGrnPerUnit": return e.calc.totalGrnPerUnit ?? -Infinity;
     case "quotedPp": return e.row.quotedPp;
     case "grnMarkup": return e.calc.grnMarkup ?? -Infinity;
     case "negotiatedPp": return e.row.negotiatedPp;
@@ -1242,6 +1248,7 @@ export function PricingDashboard() {
                     "GRN ₹/unit",
                     "GRN Diff",
                     "Adjusted GRN",
+                    "Total GRN ₹/unit",
                     "Blinkit SP",
                     "WSP Trend",
                     "Quoted PP",
@@ -1276,6 +1283,7 @@ export function PricingDashboard() {
                       calc.grnPerUnit?.toFixed(2) ?? "",
                       calc.grnDiff?.toFixed(2) ?? "",
                       row.adjustedGrn ?? 0,
+                      calc.totalGrnPerUnit?.toFixed(2) ?? "",
                       row.blinkitSp ?? "",
                       row.wspTrend ?? "",
                       row.quotedPp,
@@ -2129,20 +2137,21 @@ function ScrollTable({
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="GRN ₹/kg" active={sortKey==="grnPricePerKg"} dir={sortDir} onClick={() => toggleSort("grnPricePerKg")} /></th>
           <th title="Prev Day GRN ₹/unit" className={`${STICKY_COL} ${HEAD_TH} bg-card px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}><Tip text="GRN ₹/unit on day T-n-1 (previous day). Read-only."><span className="block truncate">Prev Day GRN ₹/unit</span></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="GRN ₹/unit" active={sortKey==="grnPerUnit"} dir={sortDir} onClick={() => toggleSort("grnPerUnit")} /></th>
-          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="(GRN ₹/unit + Adjusted GRN) − Prev Day GRN ₹/unit"><SortHeader align="right" label="GRN Diff" active={sortKey==="grnDiff"} dir={sortDir} onClick={() => toggleSort("grnDiff")} /></Tip></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Total GRN ₹/unit − Prev Day GRN ₹/unit"><SortHeader align="right" label="GRN Diff" active={sortKey==="grnDiff"} dir={sortDir} onClick={() => toggleSort("grnDiff")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Adjusted GRN" active={sortKey==="adjustedGrn"} dir={sortDir} onClick={() => toggleSort("adjustedGrn")} /></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="(GRN ₹/kg + Adjusted GRN) × CF"><SortHeader align="right" label="Total GRN ₹/unit" active={sortKey==="totalGrnPerUnit"} dir={sortDir} onClick={() => toggleSort("totalGrnPerUnit")} /></Tip></th>
           {/* Benchmark Info */}
           <th className={`${STICKY_COL} ${HEAD_TH} border-l bg-card px-2`}><SortHeader align="right" label="Blinkit SP" active={sortKey==="blinkitSp"} dir={sortDir} onClick={() => toggleSort("blinkitSp")} /></th>
           <th title="WSP Trend" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-center text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>WSP Trend</th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Quoted PP" active={sortKey==="quotedPp"} dir={sortDir} onClick={() => toggleSort("quotedPp")} /></th>
-          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Quoted PP − GRN ₹/unit"><SortHeader align="right" label="GRN Markup" active={sortKey==="grnMarkup"} dir={sortDir} onClick={() => toggleSort("grnMarkup")} /></Tip></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Quoted PP − Total GRN ₹/unit"><SortHeader align="right" label="GRN Markup" active={sortKey==="grnMarkup"} dir={sortDir} onClick={() => toggleSort("grnMarkup")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Negotiated PP" active={sortKey==="negotiatedPp"} dir={sortDir} onClick={() => toggleSort("negotiatedPp")} /></th>
           <th title="Suggested PP" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Suggested PP</th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="NLC" active={sortKey==="nlc"} dir={sortDir} onClick={() => toggleSort("nlc")} /></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="PI %" active={sortKey==="piPct"} dir={sortDir} onClick={() => toggleSort("piPct")} /></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="GM" active={sortKey==="gm"} dir={sortDir} onClick={() => toggleSort("gm")} /></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Deflection %" active={sortKey==="priceDeflectionPct"} dir={sortDir} onClick={() => toggleSort("priceDeflectionPct")} /></th>
-          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Impact PP Diff" active={sortKey==="impactPpDiff"} dir={sortDir} onClick={() => toggleSort("impactPpDiff")} /></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="(Quoted PP − Total GRN ₹/unit) × Total Demand %"><SortHeader align="right" label="Impact PP Diff" active={sortKey==="impactPpDiff"} dir={sortDir} onClick={() => toggleSort("impactPpDiff")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Impact GM" active={sortKey==="impactGm"} dir={sortDir} onClick={() => toggleSort("impactGm")} /></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="BK Value Mix" active={sortKey==="valueMix"} dir={sortDir} onClick={() => toggleSort("valueMix")} /></th>
         </tr>
@@ -2157,6 +2166,7 @@ function ScrollTable({
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.grnPerUnit)}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{averages.grnDiff !== null ? `${averages.grnDiff >= 0 ? "+" : ""}${averages.grnDiff.toFixed(2)}` : "—"}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{averages.adjustedGrn !== null ? `${averages.adjustedGrn >= 0 ? "+" : ""}${averages.adjustedGrn.toFixed(2)}` : "—"}</td>
+          <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.totalGrnPerUnit)}</td>
           {/* Benchmark */}
           <td className={`${STICKY_AVG} ${AVG_TD} border-l bg-accent px-2 text-right tabular-nums`}>{fmt(averages.blinkitSp)}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-center text-muted-foreground`}>—</td>
@@ -2240,7 +2250,7 @@ function ScrollTable({
               <td className={`px-2 text-right tabular-nums ${calc.grnDiff !== null ? (calc.grnDiff > 0 ? "text-red-600" : calc.grnDiff < 0 ? "text-green-600" : "text-muted-foreground") : "text-muted-foreground"}`}>
                 {calc.grnDiff !== null ? `${calc.grnDiff >= 0 ? "+" : ""}${calc.grnDiff.toFixed(2)}` : "-"}
               </td>
-              {/* Adjusted GRN — signed, lockable. Applies to Quoted PP on lock. */}
+              {/* Adjusted GRN — signed, lockable; does not update Quoted PP. */}
               <td className="px-2">
                 <AdjustedGrnInput
                   value={row.adjustedGrn ?? 0}
@@ -2253,24 +2263,20 @@ function ScrollTable({
                       updateRowLocal(row.fsnId, { adjustedGrnLocked: false });
                     } else {
                       const v = row.adjustedGrn ?? 0;
-                      const patch: Partial<SkuRow> = { adjustedGrnLocked: true };
-                      const persist: Partial<SkuRow> = { adjustedGrn: v };
-                      if (v !== 0 && calc.grnPerUnit !== null) {
-                        const newQ = calc.grnPerUnit + v;
-                        patch.quotedPp = newQ;
-                        patch.quotedTouched = true;
-                        persist.quotedPp = newQ;
-                        if (row.negotiatedLocked || !row.negotiatedTouched) {
-                          patch.negotiatedPp = newQ;
-                          patch.lastLockedNegotiated = newQ;
-                          persist.negotiatedPp = newQ;
-                        }
-                      }
-                      updateRowLocal(row.fsnId, patch);
-                      persistRowFields(row.fsnId, row.weightUnit, persist, { ...row, ...patch });
+                      updateRowLocal(row.fsnId, { adjustedGrnLocked: true });
+                      persistRowFields(
+                        row.fsnId,
+                        row.weightUnit,
+                        { adjustedGrn: v },
+                        { ...row, adjustedGrnLocked: true, adjustedGrn: v },
+                      );
                     }
                   }}
                 />
+              </td>
+              {/* Total GRN ₹/unit = (GRN/kg + Adjusted GRN) × CF */}
+              <td className="px-2 text-right tabular-nums text-muted-foreground">
+                {calc.totalGrnPerUnit !== null ? fmt(calc.totalGrnPerUnit) : "—"}
               </td>
 
               {/* Benchmark Info */}
@@ -2338,10 +2344,12 @@ function ScrollTable({
                           ...row,
                           quotedLocked: true,
                           negotiatedPp: row.quotedPp,
+                          negotiatedPpIsSet: row.quotedPp !== 0,
                         };
                         updateRowLocal(row.fsnId, {
                           quotedLocked: true,
                           negotiatedPp: row.quotedPp,
+                          negotiatedPpIsSet: row.quotedPp !== 0,
                         });
                         persistRowFields(
                           row.fsnId,
@@ -2359,7 +2367,7 @@ function ScrollTable({
                   />
                 </div>
               </td>
-              {/* GRN Markup = Quoted PP − GRN ₹/unit */}
+              {/* GRN Markup = Quoted PP − Total GRN ₹/unit */}
               <td className="px-2 text-right tabular-nums">
                 {calc.grnMarkup !== null ? fmt(calc.grnMarkup) : "—"}
               </td>
@@ -2370,7 +2378,7 @@ function ScrollTable({
                   locked={row.negotiatedLocked}
                   disabled={submitted}
                   highlight={row.suggestedPp !== null && !row.negotiatedLocked}
-                  onChange={(v) => updateRowLocal(row.fsnId, { negotiatedPp: v, negotiatedTouched: true })}
+                  onChange={(v) => updateRowLocal(row.fsnId, { negotiatedPp: v, negotiatedTouched: true, negotiatedPpIsSet: v !== 0 })}
                   onUnlock={() => updateRowLocal(row.fsnId, { negotiatedLocked: false })}
                   onToggleLock={() => {
                     if (!row.negotiatedLocked) {
@@ -2455,7 +2463,7 @@ function ScrollTable({
                 <td className="px-2" />
                 <td className="px-2 text-right tabular-nums font-medium text-foreground">{formatSparseAuditCell(entry, "quoted_pp")}</td>
                 <td className="px-2 text-right tabular-nums font-medium text-foreground">
-                  {formatAuditGrnMarkup(entry, row.quotedPp, calc.grnPerUnit)}
+                  {formatAuditGrnMarkup(entry, row.quotedPp, row.grnPricePerKg, row.adjustedGrn ?? 0, row.conversionFactor)}
                 </td>
                 <td className="px-2 text-right tabular-nums font-medium text-foreground">{formatSparseAuditCell(entry, "negotiated_pp")}</td>
                 <td className="px-2" />
@@ -3725,6 +3733,8 @@ function getApprovalSortValue(e: { row: ApprovalRow; calc: ReturnType<typeof der
     case "subcategory": return e.row.subcategory;
     case "totalDemandPct": return e.calc.totalDemandPct;
     case "grnPerUnit": return e.calc.grnPerUnit ?? -Infinity;
+    case "adjustedGrn": return e.row.adjustedGrn ?? 0;
+    case "totalGrnPerUnit": return e.calc.totalGrnPerUnit ?? -Infinity;
     case "blinkitSp": return e.row.blinkitSp ?? -Infinity;
     case "quotedPp": return e.row.quotedPp;
     case "negotiatedPp": return e.row.negotiatedPp;
@@ -3850,6 +3860,7 @@ function PriceApprovalTab({
     return {
       totalDemandPct: avg(src.map((e) => e.calc.totalDemandPct)),
       grnPerUnit: avg(valid(src.map((e) => e.calc.grnPerUnit))),
+      totalGrnPerUnit: avg(valid(src.map((e) => e.calc.totalGrnPerUnit))),
       blinkitSp: avg(valid(src.map((e) => e.row.blinkitSp))),
       quotedPp: avg(src.map((e) => e.row.quotedPp)),
       negotiatedPp: avg(src.map((e) => e.row.negotiatedPp)),
@@ -4328,6 +4339,7 @@ function ApprovalScrollTable({
         <col style={{ width: 100 }} />
         <col style={{ width: 100 }} />
         <col style={{ width: 100 }} />
+        <col style={{ width: 100 }} />
         <col style={{ width: 110 }} />
         <col style={{ width: 110 }} />
         <col style={{ width: 140 }} />
@@ -4338,13 +4350,14 @@ function ApprovalScrollTable({
       </colgroup>
       <thead className="sticky top-0 z-10 bg-card">
         <tr>
-          <th colSpan={3} className="h-6 border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Procurement / Benchmark</th>
+          <th colSpan={4} className="h-6 border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Procurement / Benchmark</th>
           <th colSpan={3} className="h-6 border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Pricing</th>
           <th colSpan={4} className="h-6 border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Metrics</th>
         </tr>
         <tr className={`${COL_HEAD_H} border-b bg-card`}>
           <th className="px-2"><SortHeader align="right" label="GRN ₹/unit" active={sortKey==="grnPerUnit"} dir={sortDir} onClick={() => toggleSort("grnPerUnit")} /></th>
           <th className="px-2"><SortHeader align="right" label="Adjusted GRN" active={sortKey==="adjustedGrn"} dir={sortDir} onClick={() => toggleSort("adjustedGrn")} /></th>
+          <th className="px-2"><SortHeader align="right" label="Total GRN ₹/unit" active={sortKey==="totalGrnPerUnit"} dir={sortDir} onClick={() => toggleSort("totalGrnPerUnit")} /></th>
           <th className="px-2"><SortHeader align="right" label="Blinkit SP" active={sortKey==="blinkitSp"} dir={sortDir} onClick={() => toggleSort("blinkitSp")} /></th>
           <th className="border-l px-2"><SortHeader align="right" label="Quoted PP" active={sortKey==="quotedPp"} dir={sortDir} onClick={() => toggleSort("quotedPp")} /></th>
           <th className="px-2"><SortHeader align="right" label="Negotiated PP" active={sortKey==="negotiatedPp"} dir={sortDir} onClick={() => toggleSort("negotiatedPp")} /></th>
@@ -4357,6 +4370,7 @@ function ApprovalScrollTable({
         <tr className={`${SUB_HEAD_H} border-b bg-accent/30 text-[11px] font-medium`}>
           <td className="px-2 text-right tabular-nums">{fmt(averages.grnPerUnit)}</td>
           <td className="px-2 text-right tabular-nums text-muted-foreground">—</td>
+          <td className="px-2 text-right tabular-nums">{fmt(averages.totalGrnPerUnit)}</td>
           <td className="px-2 text-right tabular-nums">{fmt(averages.blinkitSp)}</td>
           <td className="border-l px-2 text-right tabular-nums">{fmt(averages.quotedPp)}</td>
           <td className="px-2 text-right tabular-nums">{fmt(averages.negotiatedPp)}</td>
@@ -4375,6 +4389,7 @@ function ApprovalScrollTable({
             <tr key={row.fsnId} className={`${ROW_H} border-b last:border-b-0 hover:bg-muted/40`}>
               <td className="px-2 text-right tabular-nums">{calc.grnPerUnit !== null ? fmt(calc.grnPerUnit) : "—"}</td>
               <td className="px-2 text-right tabular-nums">{row.adjustedGrn && row.adjustedGrn !== 0 ? `${row.adjustedGrn > 0 ? "+" : ""}${row.adjustedGrn.toFixed(2)}` : "—"}</td>
+              <td className="px-2 text-right tabular-nums">{calc.totalGrnPerUnit !== null ? fmt(calc.totalGrnPerUnit) : "—"}</td>
               <td className="px-2 text-right tabular-nums">{row.blinkitSp !== null ? fmt(row.blinkitSp) : "—"}</td>
               <td className="border-l px-2 text-right tabular-nums">{fmt(row.quotedPp)}</td>
               <td className={`px-2 text-right tabular-nums font-medium ${negDiffers ? "bg-amber-100 text-amber-900" : ""}`}

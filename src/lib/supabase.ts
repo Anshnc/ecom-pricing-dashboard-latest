@@ -61,6 +61,8 @@ export type PriceSheetDetailRow = {
   t3_grn_price_per_kg: number | null;
   t3_grn_price_per_unit: number | null;
   grn_diff: number | null;
+  total_grn: number | null;
+  total_grn_per_unit: number | null;
   blinkit_sp: number | null;
   adjusted_grn: number | null;
   quoted_pp: number | null;
@@ -129,6 +131,8 @@ export type PricingSheetRow = {
   t3_grn_price_per_kg: number | null;
   t3_grn_price_per_unit: number | null;
   grn_diff: number | null;
+  total_grn: number | null;
+  total_grn_per_unit: number | null;
 
   // editable
   blinkit_sp: number | null;

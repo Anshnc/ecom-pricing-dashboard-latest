@@ -4,6 +4,7 @@ import {
   impactGmFromParts,
   impactPpDiffFromParts,
   resolveGrnPerUnit,
+  totalGrnPerUnitFromParts,
 } from "@/lib/pricingMetrics";
 import { supabase, type PricingSheetRow } from "@/lib/supabase";
 
@@ -12,7 +13,7 @@ import { supabase, type PricingSheetRow } from "@/lib/supabase";
  *
  * Dependency map (editable → auto-calculated):
  * - grn_price_per_kg → grn_price_per_unit, grn_diff, gm, impact_pp_diff, impact_gm
- * - adjusted_grn → grn_diff; and on lock may set quoted_pp / negotiated_pp → full PP cascade
+ * - adjusted_grn → total_grn, total_grn_per_unit, grn_diff, gm, impact_pp_diff, impact_gm
  * - blinkit_sp → pi_pct, pi_pct_quoted, pi_pct_negotiated, bk_value_mix
  * - quoted_pp → nlc (quoted path), pi_pct_quoted, impact_pp_diff, impact_gm;
  *               on lock also forces negotiated_pp → full negotiated cascade
@@ -68,13 +69,6 @@ export const EDIT_AFFECTS: Record<
   adjusted_grn: [
     "adjusted_grn",
     "grn_diff",
-    "quoted_pp",
-    "negotiated_pp",
-    "nlc",
-    "nlc_negotiated",
-    "pi_pct",
-    "pi_pct_quoted",
-    "pi_pct_negotiated",
     "gm",
     "impact_pp_diff",
     "impact_gm",
@@ -246,13 +240,14 @@ export function computeClientCascadeFields(args: {
     prevGrnPricePerUnit: prevGrnPerUnit,
     t3GrnPricePerUnit,
   });
-  const effectiveGrn = grnPerUnit !== null ? grnPerUnit + adjustedGrn : null;
+  const totalGrnPerUnit = totalGrnPerUnitFromParts(grnPricePerKg, adjustedGrn, cf);
   const grnDiff =
-    effectiveGrn !== null && prevGrnPerUnit !== null ? effectiveGrn - prevGrnPerUnit : null;
+    totalGrnPerUnit !== null && prevGrnPerUnit !== null ? totalGrnPerUnit - prevGrnPerUnit : null;
 
   const costs = pmCost + fmlDump + pc;
   const nlcQuoted = quotedPp !== null ? quotedPp + costs : null;
-  const nlcNegotiated = negotiatedPp !== null ? negotiatedPp + costs : null;
+  const nlcNegotiated =
+    negotiatedPp != null && negotiatedPp !== 0 ? negotiatedPp + costs : null;
   const nlc =
     quotedPp !== null || negotiatedPp !== null
       ? displayNlcFromParts(quotedPp ?? 0, negotiatedPp ?? 0, pmCost, fmlDump, pc)
@@ -262,10 +257,10 @@ export function computeClientCascadeFields(args: {
     blinkitSp && nlcQuoted !== null ? ((blinkitSp - nlcQuoted) / blinkitSp) * 100 : null;
   const piNegotiated =
     blinkitSp && nlcNegotiated !== null ? ((blinkitSp - nlcNegotiated) / blinkitSp) * 100 : null;
-  const piPct = piNegotiated ?? piQuoted;
+  const piPct = piNegotiated;
 
-  const gm = grnPerUnit !== null && nlc !== null ? nlc - grnPerUnit : null;
-  const impactPpDiff = impactPpDiffFromParts(quotedPp, grnPerUnit, demandPct);
+  const gm = totalGrnPerUnit !== null && nlc !== null ? nlc - totalGrnPerUnit : null;
+  const impactPpDiff = impactPpDiffFromParts(quotedPp, totalGrnPerUnit, demandPct);
   const impactGm = impactGmFromParts(gm, demandPct);
   const bkValueMix = blinkitSp !== null ? blinkitSp * demandUnits : null;
 
@@ -588,15 +583,20 @@ export function formatSparseAuditCell(
   return `₹${Number(raw).toFixed(2)}`;
 }
 
-/** GRN Markup is display-only; show when either quoted or grn/unit changed in the sparse row. */
+/** GRN Markup is display-only; show when either quoted or grn/kg changed in the sparse row. */
 export function formatAuditGrnMarkup(
   entry: PricingSheetAuditRow,
   fallbackQuoted: number | null,
-  fallbackGrnPerUnit: number | null,
+  grnPricePerKg: number | null,
+  adjustedGrn: number,
+  cf: number,
 ): string {
   const quoted = entry.quoted_pp ?? fallbackQuoted;
-  const grnUnit = entry.grn_price_per_unit ?? fallbackGrnPerUnit;
-  if (entry.quoted_pp == null && entry.grn_price_per_unit == null) return "";
-  if (quoted == null || grnUnit == null) return "";
-  return `₹${(quoted - grnUnit).toFixed(2)}`;
+  const kg = entry.grn_price_per_kg ?? grnPricePerKg;
+  const adj = entry.adjusted_grn ?? adjustedGrn;
+  const factor = entry.cf ?? cf;
+  if (entry.quoted_pp == null && entry.grn_price_per_kg == null && entry.adjusted_grn == null) return "";
+  const totalGrnPerUnit = totalGrnPerUnitFromParts(kg, adj, factor);
+  if (quoted == null || totalGrnPerUnit == null) return "";
+  return `₹${(quoted - totalGrnPerUnit).toFixed(2)}`;
 }
