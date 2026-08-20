@@ -57,16 +57,18 @@ assertClose(totalGrnPerUnit, 20, "Total GRN/unit");
 assertClose(calc.totalGrnPerUnit, 20, "Total GRN/unit in calc");
 assertClose(calc.impactPpDiff, impactPpDiffFromParts(30, 20, mixPct), "Impact PP");
 assertClose(calc.impactPpDiff, (30 - 20) * (mixPct / 100), "Impact PP formula");
-assertClose(calc.gm, 32 - 20, "GM");
+assertClose(calc.gm, 34 - 20, "GM");
 assertClose(calc.grnMarkup, 30 - 20, "GRN Markup");
 assertClose(calc.impactGm, impactGmFromParts(calc.gm, mixPct), "Impact GM");
 assertClose(
   calc.deflectionPct,
-  deflectionPctFromNlc(32, 30),
+  deflectionPctFromNlc(34, 30),
   "Deflection",
 );
-assertClose(calc.piPct, piPctFromDisplayNlc(50, 32), "PI% displayed NLC");
+assertClose(calc.piPct, piPctFromDisplayNlc(50, 34), "PI% displayed NLC");
 assertClose(calc.valueMix, 50 * 1_000, "BK Value Mix");
+assertClose(calc.nlc, 34, "NLC is Quoted PP + costs");
+assertClose(calc.nlcValueMix, 34 * 1_000, "NLC Value Mix matches displayed NLC");
 
 // Missing GRN/kg should fall back to stored unit (common Aug sheet case).
 const fallback = computeRowMetrics(
@@ -89,12 +91,12 @@ const noPrev = computeRowMetrics({ ...row, prevDayNlc: null }, totalDemand);
 assertClose(noPrev.deflectionPct, null, "Deflection without prior NLC");
 
 // Unchanged NLC vs yesterday → 0% deflection (valid).
-const zeroDefl = computeRowMetrics({ ...row, prevDayNlc: 32 }, totalDemand);
+const zeroDefl = computeRowMetrics({ ...row, prevDayNlc: 34 }, totalDemand);
 assertClose(zeroDefl.deflectionPct, 0, "Zero deflection when NLC unchanged");
 
 // Negative deflection when NLC drops vs yesterday (valid).
 const negDefl = computeRowMetrics({ ...row, prevDayNlc: 40 }, totalDemand);
-assertClose(negDefl.deflectionPct, deflectionPctFromNlc(32, 40), "Negative deflection");
+assertClose(negDefl.deflectionPct, deflectionPctFromNlc(34, 40), "Negative deflection");
 
 // Missing quoted PP → impact PP null (shows "—"), not a fake zero.
 const noQuoted = computeRowMetrics({ ...row, quotedPpIsSet: false }, totalDemand);
@@ -103,7 +105,7 @@ assertClose(noQuoted.impactPpDiff, null, "Impact PP without quoted PP");
 // Adjusted GRN shifts Total GRN/unit and GM, not Quoted PP.
 const withAdj = computeRowMetrics({ ...row, adjustedGrn: 2 }, totalDemand);
 assertClose(withAdj.totalGrnPerUnit, (40 + 2) * 0.5, "Total GRN/unit with adj");
-assertClose(withAdj.gm, 32 - 21, "GM with adj");
+assertClose(withAdj.gm, 34 - 21, "GM with adj");
 assertClose(withAdj.grnMarkup, 30 - 21, "GRN Markup with adj");
 
 // Zero GM → zero impact GM (valid).
@@ -116,10 +118,10 @@ const noKg = computeRowMetrics({ ...row, grnPricePerKg: null }, totalDemand);
 assertClose(noKg.totalGrnPerUnit, null, "Total GRN/unit without GRN/kg");
 assertClose(noKg.gm, null, "GM without GRN/kg");
 
-// PI% uses displayed NLC; still calculated when Negotiated PP was never set.
+// PI% uses displayed NLC; when Negotiated was never set, NLC is Quoted + costs.
 const noNeg = computeRowMetrics({ ...row, negotiatedPpIsSet: false }, totalDemand);
-assertClose(noNeg.piPct, piPctFromDisplayNlc(50, 32), "PI% without negotiated PP still uses displayed NLC");
-assertClose(noNeg.nlc, 32, "NLC still uses the displayed PP path");
+assertClose(noNeg.piPct, piPctFromDisplayNlc(50, 34), "PI% without negotiated PP uses Quoted NLC");
+assertClose(noNeg.nlc, 34, "NLC uses Quoted PP when Negotiated was never set");
 
 const noSp = computeRowMetrics({ ...row, blinkitSp: null }, totalDemand);
 assertClose(noSp.piPct, null, "PI% blank when Blinkit SP is missing");
@@ -190,5 +192,13 @@ assertClose(
   null,
   "PI% avg is null when no BK SP value to divide by",
 );
+
+// Negotiated PP is never part of NLC, even when it is set and differs from Quoted.
+const ignoresNeg = computeRowMetrics(
+  { ...row, negotiatedPp: 897, negotiatedPpIsSet: true },
+  totalDemand,
+);
+assertClose(ignoresNeg.nlc, 30 + 2 + 1 + 1, "NLC ignores Negotiated PP");
+assertClose(ignoresNeg.nlcValueMix, 34 * 1_000, "NLC Value Mix follows Quoted NLC");
 
 console.log("pricingMetrics.test.ts — all assertions passed");

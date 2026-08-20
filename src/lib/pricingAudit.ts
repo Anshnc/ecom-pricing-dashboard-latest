@@ -1,6 +1,6 @@
 import { fetchPriceSheetHeader, fetchPriceSheetDetails, mergeHeaderAndDetails } from "@/lib/priceSheetDb";
 import {
-  displayNlcFromParts,
+  quotedNlcFromParts,
   impactGmFromParts,
   impactPpDiffFromParts,
   resolveGrnPerUnit,
@@ -15,9 +15,8 @@ import { supabase, type PricingSheetRow } from "@/lib/supabase";
  * - grn_price_per_kg → grn_price_per_unit, grn_diff, gm, impact_pp_diff, impact_gm
  * - adjusted_grn → total_grn, total_grn_per_unit, grn_diff, gm, impact_pp_diff, impact_gm
  * - blinkit_sp → pi_pct, pi_pct_quoted, pi_pct_negotiated, bk_value_mix
- * - quoted_pp → nlc (quoted path), pi_pct_quoted, impact_pp_diff, impact_gm;
- *               on lock also forces negotiated_pp → full negotiated cascade
- * - negotiated_pp → nlc, nlc_negotiated, pi_pct, pi_pct_negotiated, gm
+ * - quoted_pp → nlc, pi_pct, pi_pct_quoted, impact_pp_diff, impact_gm, gm
+ * - negotiated_pp → nlc_negotiated, pi_pct_negotiated only (not grid NLC / GM / PI%)
  */
 export const AUDIT_VALUE_COLUMNS = [
   "grn_price_per_kg",
@@ -84,7 +83,6 @@ export const EDIT_AFFECTS: Record<
     "quoted_pp",
     "negotiated_pp",
     "nlc",
-    "nlc_negotiated",
     "pi_pct",
     "pi_pct_quoted",
     "pi_pct_negotiated",
@@ -92,14 +90,7 @@ export const EDIT_AFFECTS: Record<
     "impact_pp_diff",
     "impact_gm",
   ],
-  negotiated_pp: [
-    "negotiated_pp",
-    "nlc",
-    "nlc_negotiated",
-    "pi_pct",
-    "pi_pct_negotiated",
-    "gm",
-  ],
+  negotiated_pp: ["negotiated_pp", "nlc_negotiated", "pi_pct_negotiated"],
 };
 
 /** Derived columns — always taken from client cascade, never stale/null DB copies. */
@@ -248,16 +239,14 @@ export function computeClientCascadeFields(args: {
   const nlcQuoted = quotedPp !== null ? quotedPp + costs : null;
   const nlcNegotiated =
     negotiatedPp != null && negotiatedPp !== 0 ? negotiatedPp + costs : null;
-  const nlc =
-    quotedPp !== null || negotiatedPp !== null
-      ? displayNlcFromParts(quotedPp ?? 0, negotiatedPp ?? 0, pmCost, fmlDump, pc)
-      : null;
+  // Grid NLC is always Quoted PP + costs (Negotiated PP is not part of NLC).
+  const nlc = quotedNlcFromParts(quotedPp ?? 0, pmCost, fmlDump, pc);
 
   const piQuoted =
     blinkitSp && nlcQuoted !== null ? ((blinkitSp - nlcQuoted) / blinkitSp) * 100 : null;
   const piNegotiated =
     blinkitSp && nlcNegotiated !== null ? ((blinkitSp - nlcNegotiated) / blinkitSp) * 100 : null;
-  const piPct = piNegotiated;
+  const piPct = piQuoted;
 
   const gm = totalGrnPerUnit !== null && nlc !== null ? nlc - totalGrnPerUnit : null;
   const impactPpDiff = impactPpDiffFromParts(quotedPp, totalGrnPerUnit, demandPct);

@@ -12,7 +12,7 @@ export type RowMetricsInput = {
   /** False when DB quoted_pp is null — impact PP must show "—", not a coerced zero. */
   quotedPpIsSet?: boolean;
   negotiatedPp: number;
-  /** False when DB negotiated_pp is null/0 — PI% should be blank under negotiated-only spec. */
+  /** False when DB negotiated_pp is null/0 — used for presence checks, not NLC. */
   negotiatedPpIsSet?: boolean;
   packagingCost: number;
   fmlCost: number;
@@ -46,17 +46,15 @@ export function demandMixPct(demandUnits: number, totalDemand: number): number {
   return totalDemand > 0 ? (demandUnits / totalDemand) * 100 : 0;
 }
 
-/** Display NLC = negotiated PP + costs when set, else quoted PP + costs (matches NLC column). */
+/** Display NLC = Quoted PP + PM + FML + PC. Negotiated PP is never part of NLC. */
 export function displayNlcFromParts(
   quotedPp: number,
-  negotiatedPp: number,
+  _negotiatedPp: number,
   packagingCost: number,
   fmlCost: number,
   processingCost: number,
 ): number {
-  const costs = packagingCost + fmlCost + processingCost;
-  const pp = negotiatedPp !== 0 ? negotiatedPp : quotedPp;
-  return pp + costs;
+  return quotedNlcFromParts(quotedPp, packagingCost, fmlCost, processingCost);
 }
 
 /** Quoted NLC = quoted PP + fixed cost components (matches DB trigger). */
@@ -257,13 +255,7 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
       : null;
 
   const quotedNlc = quotedNlcFromParts(row.quotedPp, row.packagingCost, row.fmlCost, row.processingCost);
-  const nlc = displayNlcFromParts(
-    row.quotedPp,
-    row.negotiatedPp,
-    row.packagingCost,
-    row.fmlCost,
-    row.processingCost,
-  );
+  const nlc = quotedNlc;
   const nlcForPi = displayNlcIsPresent(row) ? nlc : null;
   const piPct = piPctFromDisplayNlc(row.blinkitSp, nlcForPi);
   const gm = totalGrnPerUnit !== null ? nlc - totalGrnPerUnit : null;
@@ -283,8 +275,8 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
       : null;
 
   const valueMix = row.blinkitSp !== null ? row.blinkitSp * row.demandUnits : null;
-  // NLC Value Mix = quoted NLC × demand (matches working-sheet "NLC" column × demand units).
-  const nlcValueMix = quotedNlc * row.demandUnits;
+  // NLC Value Mix uses the same NLC as the grid column.
+  const nlcValueMix = nlc * row.demandUnits;
   const grnMarkup = totalGrnPerUnit !== null ? row.quotedPp - totalGrnPerUnit : null;
 
   return {

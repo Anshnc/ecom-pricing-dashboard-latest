@@ -169,6 +169,9 @@ export type PricingSheetRow = {
 
   created_at?: string | null;
   updated_at?: string | null;
+
+  /** Client enrichment from calendar yesterday — not a DB column. */
+  prev_day_nlc?: number | null;
 };
 
 export type SubcategoryRow = {

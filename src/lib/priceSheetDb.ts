@@ -28,29 +28,26 @@ const MYSQL_FRESH_COLUMNS = new Set([
   "t3_grn_price_per_unit",
 ] as const);
 
-/** Only Quoted PP and Negotiated PP are copied from the prior day's sheet (matched on fsn_id + weight_unit). */
+/** Only Quoted PP is copied from the prior day's sheet (matched on fsn_id + weight_unit). Negotiated PP must be entered on this sheet. */
 const CARRY_FORWARD_COLUMNS: (keyof PriceSheetDetailRow)[] = [
   "quoted_pp",
-  "negotiated_pp",
 ];
 
 function detailLineKey(fsnId: string | null | undefined, weightUnit: string | null | undefined) {
   return `${fsnId ?? ""}||${weightUnit ?? ""}`;
 }
 
-/** Display NLC from a detail row — prefers negotiated, then quoted (matches UI NLC column). */
+/** Yesterday NLC for deflection = Quoted PP + costs (same as the grid NLC column). */
 function displayNlcFromDetailRow(
   d: Pick<
     PriceSheetDetailRow,
-    "nlc" | "nlc_negotiated" | "quoted_pp" | "negotiated_pp" | "pm_cost" | "fml_dump" | "pc"
+    "nlc" | "quoted_pp" | "pm_cost" | "fml_dump" | "pc"
   >,
 ): number | null {
-  if (d.nlc_negotiated != null && d.nlc_negotiated !== 0) return d.nlc_negotiated;
   const costs = (d.pm_cost ?? 0) + (d.fml_dump ?? 0) + (d.pc ?? 0);
-  if (d.negotiated_pp != null && d.negotiated_pp !== 0) return d.negotiated_pp + costs;
+  if (d.quoted_pp != null) return d.quoted_pp + costs;
   if (d.nlc != null && d.nlc !== 0) return d.nlc;
-  if (d.quoted_pp == null) return null;
-  return d.quoted_pp + costs;
+  return null;
 }
 
 export type PriorNlcLookup = {
@@ -66,7 +63,10 @@ export async function fetchCalendarPrevDayNlcLookup(
   city: string,
   deliveryDate: string,
 ): Promise<PriorNlcLookup> {
-  const empty = { byLineKey: new Map<string, number>(), byFsn: new Map<string, number>() };
+  const empty: PriorNlcLookup = {
+    byLineKey: new Map<string, number>(),
+    byFsn: new Map<string, number>(),
+  };
 
   const prevDate = addDaysISO(deliveryDate, -1);
   const prevHeader = await fetchPriceSheetHeader(city, prevDate);

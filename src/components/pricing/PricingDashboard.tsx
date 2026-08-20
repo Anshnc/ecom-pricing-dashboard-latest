@@ -2357,20 +2357,15 @@ function ScrollTable({
                         const after: SkuRow = {
                           ...row,
                           quotedLocked: true,
-                          negotiatedPp: row.quotedPp,
-                          negotiatedPpIsSet: row.quotedPp !== 0,
                         };
                         updateRowLocal(row.fsnId, {
                           quotedLocked: true,
-                          negotiatedPp: row.quotedPp,
-                          negotiatedPpIsSet: row.quotedPp !== 0,
                         });
                         persistRowFields(
                           row.fsnId,
                           row.weightUnit,
                           {
                             quotedPp: row.quotedPp,
-                            negotiatedPp: row.quotedPp,
                           },
                           after,
                         );
@@ -2399,10 +2394,12 @@ function ScrollTable({
                       const after: SkuRow = {
                         ...row,
                         negotiatedLocked: true,
+                        negotiatedTouched: true,
                         lastLockedNegotiated: row.negotiatedPp,
                       };
                       updateRowLocal(row.fsnId, {
                         negotiatedLocked: true,
+                        negotiatedTouched: true,
                         lastLockedNegotiated: row.negotiatedPp,
                       });
                       persistRowFields(

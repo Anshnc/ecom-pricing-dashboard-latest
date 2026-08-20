@@ -18,8 +18,18 @@ export type SkuCostComponent = FsnCostComponent;
 
 const TABLE = "fsn_cost_components";
 
+/** Strip encoding junk / extra spaces so sheet packs match fsn_cost_components. */
+export function normalizeWeightUnit(weightUnit: string | null | undefined): string {
+  return (weightUnit ?? "")
+    .normalize("NFC")
+    .replace(/\u00c2/g, "")
+    .replace(/[\uFFFD\u009d]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function skuCostKey(fsnId: string, weightUnit: string | null | undefined) {
-  return `${fsnId.trim()}||${weightUnit ?? ""}`;
+  return `${fsnId.trim().toUpperCase()}||${normalizeWeightUnit(weightUnit)}`;
 }
 
 function csvField(row: Record<string, string>, ...keys: string[]): string | undefined {
@@ -216,20 +226,15 @@ export async function fetchSkuCostComponents(
   return buildSkuCostLookup(data as FsnCostComponent[]);
 }
 
-/** Apply reference-table costs onto detail rows when missing or zero. */
-function costNeedsFill(v: number | null | undefined): boolean {
-  return v == null || v === 0;
-}
-
-function resolveCost(
+/** Table value wins, including 0. Null in the table leaves the sheet value. */
+function overlayCost(
   current: number | null | undefined,
   reference: number | null | undefined,
 ): number | null {
-  if (!costNeedsFill(current)) return current ?? null;
-  if (reference != null && reference !== 0) return reference;
-  return current ?? null;
+  return reference != null ? reference : (current ?? null);
 }
 
+/** Overlay `fsn_cost_components` onto every sheet row for that FSN (pack match, else unique FSN row). */
 export async function applySkuCostComponents<
   T extends {
     fsn_id?: string | null;
@@ -243,7 +248,6 @@ export async function applySkuCostComponents<
   const pairs: Array<{ fsn_id: string; weight_unit: string | null }> = [];
   for (const r of rows) {
     if (!r.fsn_id) continue;
-    if (!costNeedsFill(r.pm_cost) && !costNeedsFill(r.fml_dump) && !costNeedsFill(r.pc)) continue;
     pairs.push({ fsn_id: r.fsn_id, weight_unit: r.weight_unit ?? null });
     if (r.weight_unit_db && r.weight_unit_db !== r.weight_unit) {
       pairs.push({ fsn_id: r.fsn_id, weight_unit: r.weight_unit_db });
@@ -260,9 +264,9 @@ export async function applySkuCostComponents<
 
     return {
       ...r,
-      pm_cost: resolveCost(r.pm_cost, c.pm_cost),
-      fml_dump: resolveCost(r.fml_dump, c.fml_dump),
-      pc: resolveCost(r.pc, c.pc),
+      pm_cost: overlayCost(r.pm_cost, c.pm_cost),
+      fml_dump: overlayCost(r.fml_dump, c.fml_dump),
+      pc: overlayCost(r.pc, c.pc),
     };
   });
 }
