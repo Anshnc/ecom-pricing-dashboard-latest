@@ -1,5 +1,6 @@
 import {
   basketPiPctAvg,
+  bkValueMixDemandWeightedAvg,
   computeRowMetrics,
   deflectionPctFromNlc,
   demandMixPct,
@@ -8,6 +9,7 @@ import {
   impactPpDiffFromParts,
   meanBlinkitSpWhenBothPresent,
   piPctFromDisplayNlc,
+  quotedPpIsPresent,
   resolveGrnPerUnit,
   simpleMean,
   totalGrnPerUnitFromParts,
@@ -98,9 +100,19 @@ assertClose(zeroDefl.deflectionPct, 0, "Zero deflection when NLC unchanged");
 const negDefl = computeRowMetrics({ ...row, prevDayNlc: 40 }, totalDemand);
 assertClose(negDefl.deflectionPct, deflectionPctFromNlc(34, 40), "Negative deflection");
 
-// Missing quoted PP → impact PP null (shows "—"), not a fake zero.
-const noQuoted = computeRowMetrics({ ...row, quotedPpIsSet: false }, totalDemand);
+// Missing quoted PP → NLC and all NLC-dependent columns blank.
+const noQuoted = computeRowMetrics({ ...row, quotedPpIsSet: false, quotedPp: 0 }, totalDemand);
+assertClose(noQuoted.nlc, null, "NLC null without quoted PP");
+assertClose(noQuoted.gm, null, "GM null without quoted PP");
+assertClose(noQuoted.deflectionPct, null, "Deflection null without quoted PP");
+assertClose(noQuoted.piPct, null, "PI% null without quoted PP");
+assertClose(noQuoted.nlcValueMix, null, "NLC Value Mix null without quoted PP");
 assertClose(noQuoted.impactPpDiff, null, "Impact PP without quoted PP");
+
+// Quoted PP = 0 is valid — NLC is costs only (unchanged).
+const quotedZero = computeRowMetrics({ ...row, quotedPp: 0, quotedPpIsSet: true }, totalDemand);
+assertClose(quotedZero.nlc, 0 + 2 + 1 + 1, "NLC with quoted PP zero");
+assertClose(quotedZero.impactPpDiff, impactPpDiffFromParts(0, 20, mixPct), "Impact PP with quoted PP zero");
 
 // Adjusted GRN shifts Total GRN/unit and GM, not Quoted PP.
 const withAdj = computeRowMetrics({ ...row, adjustedGrn: 2 }, totalDemand);
@@ -129,7 +141,14 @@ assertClose(noSp.piPct, null, "PI% blank when Blinkit SP is missing");
 // Simple mean of Blinkit SP / PI% / BK mix skips NA/blanks.
 assertClose(simpleMean([50, 150, null]), 100, "Blinkit SP simple mean skips blank");
 assertClose(simpleMean([10, 20, null]), 15, "PI% simple mean skips blank");
-assertClose(simpleMean([5000, 120000, null]), 62500, "BK Value Mix simple mean skips blank");
+assertClose(
+  bkValueMixDemandWeightedAvg([
+    { totalDemandPct: 60, blinkitSp: 50 },
+    { totalDemandPct: 40, blinkitSp: 100 },
+  ]),
+  (60 * 50 + 40 * 100) / 100,
+  "BK Value Mix avg = SUMPRODUCT(demand %, Blinkit SP) / sum(demand %)",
+);
 assertClose(simpleMean([null, undefined, Number.NaN]), null, "All-blank average is null");
 assertClose(simpleMean([0, 10]), 5, "Zero is data, not blank");
 
@@ -140,10 +159,13 @@ function assertFalse(actual: boolean, label: string) {
   if (actual) throw new Error(`${label}: expected false, got ${actual}`);
 }
 
-assertTrue(displayNlcIsPresent({ quotedPp: 30, quotedPpIsSet: true, negotiatedPp: 0, negotiatedPpIsSet: false }), "NLC present when Quoted PP is set");
-assertTrue(displayNlcIsPresent({ quotedPp: 0, quotedPpIsSet: false, negotiatedPp: 28, negotiatedPpIsSet: true }), "NLC present when only Negotiated PP is set");
-assertFalse(displayNlcIsPresent({ quotedPp: 0, quotedPpIsSet: false, negotiatedPp: 0, negotiatedPpIsSet: false }), "NLC absent when neither PP is entered");
-assertFalse(displayNlcIsPresent({ quotedPp: 0, quotedPpIsSet: true, negotiatedPp: 0, negotiatedPpIsSet: false }), "Quoted PP of 0 is not NLC");
+assertTrue(displayNlcIsPresent({ quotedPp: 30, quotedPpIsSet: true }), "NLC present when Quoted PP is set");
+assertTrue(displayNlcIsPresent({ quotedPp: 0, quotedPpIsSet: true }), "NLC present when Quoted PP is zero");
+assertFalse(displayNlcIsPresent({ quotedPp: 0, quotedPpIsSet: false }), "NLC absent when Quoted PP not entered");
+assertFalse(
+  displayNlcIsPresent({ quotedPp: 0, quotedPpIsSet: false, negotiatedPp: 28, negotiatedPpIsSet: true }),
+  "Negotiated PP alone does not make NLC present",
+);
 
 // Count / denominator is only rows where NLC and Blinkit SP are both present.
 assertClose(

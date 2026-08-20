@@ -51,10 +51,10 @@ import { formatLocalISO, loadPricingSheetDemand, todayISO, upsertDemandUploadRow
 import { useFrozenSort, type SortDir } from "@/hooks/useFrozenSort";
 import {
   basketPiPctAvg,
+  bkValueMixDemandWeightedAvg,
   computeRowMetrics,
   displayNlcIsPresent,
   meanBlinkitSpWhenBothPresent,
-  simpleMean,
 } from "@/lib/pricingMetrics";
 import { upsertFsnCostComponentsFromCsv, fetchFsnCostComponentsByFsns, parseFsnCostCsvRows } from "@/lib/skuCostComponents";
 import { RaasCheckTab } from "@/components/pricing/RaasCheckTab";
@@ -392,7 +392,12 @@ function computePriceUploadAverages(enriched: Enriched[]) {
     priceDeflectionPct: weightedByDemandPct(enriched, (e) => e.calc.deflectionPct),
     impactPpDiff: plainSum(enriched, (e) => e.calc.impactPpDiff),
     impactGm: plainSum(enriched, (e) => e.calc.impactGm),
-    valueMix: simpleMean(enriched.map((e) => e.calc.valueMix)),
+    valueMix: bkValueMixDemandWeightedAvg(
+      enriched.map((e) => ({
+        totalDemandPct: e.calc.totalDemandPct,
+        blinkitSp: e.row.blinkitSp,
+      })),
+    ),
     // Demand-weighted avg of row GM — not (avg NLC − avg GRN), which skews when GRN is missing on some rows.
     gm: weightedByDemandPct(enriched, (e) => e.calc.gm),
     nlcValueMix: plainSum(enriched, (e) => e.calc.nlcValueMix),
@@ -1304,7 +1309,7 @@ export function PricingDashboard() {
                       calc.grnMarkup?.toFixed(2) ?? "",
                       row.negotiatedPp,
                       row.suggestedPp ?? "",
-                      calc.nlc.toFixed(2),
+                      calc.nlc?.toFixed(2) ?? "",
                       calc.piPct?.toFixed(2) ?? "",
                       calc.gm?.toFixed(2) ?? "",
                       calc.deflectionPct?.toFixed(2) ?? "",
@@ -2226,7 +2231,9 @@ function ScrollTable({
               <td className="px-2 text-right tabular-nums">{row.conversionFactor.toFixed(2)}</td>
               <td className="border-l px-2 text-right tabular-nums">{row.demandUnits.toLocaleString()}</td>
               {/* Demand Info */}
-              <td className="px-2 text-right tabular-nums">₹{Math.round(calc.nlcValueMix).toLocaleString()}</td>
+              <td className="px-2 text-right tabular-nums">
+                {calc.nlcValueMix !== null ? `₹${Math.round(calc.nlcValueMix).toLocaleString()}` : "—"}
+              </td>
 
               {/* GRN ₹/kg — locked by default; click field to edit, lock to save */}
               <td className={`px-2 ${row.grnPricePerKg === null ? "bg-warn-bg/40" : ""}`}>

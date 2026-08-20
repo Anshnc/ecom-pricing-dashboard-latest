@@ -46,7 +46,6 @@ function displayNlcFromDetailRow(
 ): number | null {
   const costs = (d.pm_cost ?? 0) + (d.fml_dump ?? 0) + (d.pc ?? 0);
   if (d.quoted_pp != null) return d.quoted_pp + costs;
-  if (d.nlc != null && d.nlc !== 0) return d.nlc;
   return null;
 }
 

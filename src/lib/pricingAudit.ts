@@ -1,6 +1,5 @@
 import { fetchPriceSheetHeader, fetchPriceSheetDetails, mergeHeaderAndDetails } from "@/lib/priceSheetDb";
 import {
-  quotedNlcFromParts,
   impactGmFromParts,
   impactPpDiffFromParts,
   resolveGrnPerUnit,
@@ -239,8 +238,7 @@ export function computeClientCascadeFields(args: {
   const nlcQuoted = quotedPp !== null ? quotedPp + costs : null;
   const nlcNegotiated =
     negotiatedPp != null && negotiatedPp !== 0 ? negotiatedPp + costs : null;
-  // Grid NLC is always Quoted PP + costs (Negotiated PP is not part of NLC).
-  const nlc = quotedNlcFromParts(quotedPp ?? 0, pmCost, fmlDump, pc);
+  const nlc = nlcQuoted;
 
   const piQuoted =
     blinkitSp && nlcQuoted !== null ? ((blinkitSp - nlcQuoted) / blinkitSp) * 100 : null;

@@ -28,16 +28,17 @@ export type RowMetrics = {
   totalGrnPerUnit: number | null;
   prevDayGrnPerUnit: number | null;
   grnDiff: number | null;
-  nlc: number;
+  /** Null until Quoted PP is entered (Negotiated PP never affects NLC). */
+  nlc: number | null;
   piPct: number | null;
   gm: number | null;
   totalDemandPct: number;
-  quotedNlc: number;
+  quotedNlc: number | null;
   impactPpDiff: number | null;
   impactGm: number | null;
   deflectionPct: number | null;
   valueMix: number | null;
-  nlcValueMix: number;
+  nlcValueMix: number | null;
   grnMarkup: number | null;
 };
 
@@ -106,9 +107,22 @@ export function resolveGrnPerUnit(args: {
 }
 
 /** Deflection vs prior-day NLC: ((today NLC − prev NLC) / prev NLC) × 100. */
-export function deflectionPctFromNlc(currentNlc: number, prevNlc: number | null | undefined): number | null {
-  if (prevNlc == null || prevNlc === 0) return null;
+export function deflectionPctFromNlc(
+  currentNlc: number | null,
+  prevNlc: number | null | undefined,
+): number | null {
+  if (currentNlc == null || prevNlc == null || prevNlc === 0) return null;
   return ((currentNlc - prevNlc) / prevNlc) * 100;
+}
+
+/** True when Quoted PP was entered on the sheet (null = not entered; 0 is valid). */
+export function quotedPpIsPresent(row: {
+  quotedPp?: number;
+  quotedPpIsSet?: boolean;
+}): boolean {
+  if (row.quotedPpIsSet === false) return false;
+  if (row.quotedPpIsSet === true) return true;
+  return row.quotedPp != null;
 }
 
 /** Impact PP Diff = (Quoted PP − Total GRN ₹/unit) × Total Demand %. */
@@ -135,18 +149,31 @@ export function negotiatedPpIsPresent(negotiatedPp: number, negotiatedPpIsSet?: 
 }
 
 /**
- * Displayed NLC is present when Quoted PP or Negotiated PP was actually entered.
- * 0 PP is treated as not entered (same as a blank). Missing both → NLC is not present.
+ * Displayed NLC is present only when Quoted PP was entered.
+ * Negotiated PP is never part of NLC. Quoted PP = 0 is a valid entry.
  */
 export function displayNlcIsPresent(row: {
   quotedPp?: number;
   quotedPpIsSet?: boolean;
-  negotiatedPp: number;
+  negotiatedPp?: number;
   negotiatedPpIsSet?: boolean;
 }): boolean {
-  const quotedEntered = row.quotedPp != null && row.quotedPp !== 0;
-  if (quotedEntered) return true;
-  return negotiatedPpIsPresent(row.negotiatedPp, row.negotiatedPpIsSet);
+  return quotedPpIsPresent(row);
+}
+
+/** Averages-row BK Value Mix = SUMPRODUCT(Total Demand %, Blinkit SP) / Σ Total Demand %. */
+export function bkValueMixDemandWeightedAvg(
+  rows: Array<{ totalDemandPct: number; blinkitSp: number | null | undefined }>,
+): number | null {
+  let weightedSum = 0;
+  let weightSum = 0;
+  for (const r of rows) {
+    const sp = r.blinkitSp;
+    if (sp === null || sp === undefined || Number.isNaN(sp)) continue;
+    weightedSum += r.totalDemandPct * sp;
+    weightSum += r.totalDemandPct;
+  }
+  return weightSum > 0 ? weightedSum / weightSum : null;
 }
 
 /**
@@ -254,11 +281,13 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
       ? totalGrnPerUnit - prevDayGrnPerUnit
       : null;
 
-  const quotedNlc = quotedNlcFromParts(row.quotedPp, row.packagingCost, row.fmlCost, row.processingCost);
-  const nlc = quotedNlc;
-  const nlcForPi = displayNlcIsPresent(row) ? nlc : null;
-  const piPct = piPctFromDisplayNlc(row.blinkitSp, nlcForPi);
-  const gm = totalGrnPerUnit !== null ? nlc - totalGrnPerUnit : null;
+  const nlcPresent = quotedPpIsPresent(row);
+  const nlc = nlcPresent
+    ? quotedNlcFromParts(row.quotedPp, row.packagingCost, row.fmlCost, row.processingCost)
+    : null;
+  const piPct = piPctFromDisplayNlc(row.blinkitSp, nlc);
+  const gm =
+    nlc !== null && totalGrnPerUnit !== null ? nlc - totalGrnPerUnit : null;
   const mixPct = demandMixPct(row.demandUnits, totalDemand);
   const quotedForImpact = row.quotedPpIsSet === false ? null : row.quotedPp;
 
@@ -269,15 +298,12 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
   const impactGm = impactGmFromParts(gm, mixPct);
 
   // Deflection = ((today NLC − yesterday NLC) / yesterday NLC) × 100 — formula only, no DB fallback.
-  const deflectionPct =
-    row.prevDayNlc != null && row.prevDayNlc !== 0
-      ? deflectionPctFromNlc(nlc, row.prevDayNlc)
-      : null;
+  const deflectionPct = deflectionPctFromNlc(nlc, row.prevDayNlc);
 
   const valueMix = row.blinkitSp !== null ? row.blinkitSp * row.demandUnits : null;
-  // NLC Value Mix uses the same NLC as the grid column.
-  const nlcValueMix = nlc * row.demandUnits;
-  const grnMarkup = totalGrnPerUnit !== null ? row.quotedPp - totalGrnPerUnit : null;
+  const nlcValueMix = nlc !== null ? nlc * row.demandUnits : null;
+  const grnMarkup =
+    nlcPresent && totalGrnPerUnit !== null ? row.quotedPp - totalGrnPerUnit : null;
 
   return {
     grnPerUnit,
@@ -288,7 +314,7 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
     piPct,
     gm,
     totalDemandPct: mixPct,
-    quotedNlc,
+    quotedNlc: nlc,
     impactPpDiff,
     impactGm,
     deflectionPct,
