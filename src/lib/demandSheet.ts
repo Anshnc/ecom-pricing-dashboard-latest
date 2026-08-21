@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { withMysqlConnection } from "@/lib/mysqlDb";
 import { CITY_NAME_TO_ID, fsnWeightKey, resolveFsnWeightUnitsForCity } from "@/lib/fsnWeightUnit";
+import { applyComboGrnPerKgOverride } from "@/lib/comboGrnKg";
 import type { PricingSheetRow } from "@/lib/supabase";
 
 export type DemandQueryRow = {
@@ -673,5 +674,5 @@ export async function loadDemandForPricingSheet(
   city: string,
 ): Promise<Partial<PricingSheetRow>[]> {
   const result = await fetchDemandForPricingSheet({ data: { deliveryDate, city } });
-  return result.rows;
+  return applyComboGrnPerKgOverride(result.rows);
 }

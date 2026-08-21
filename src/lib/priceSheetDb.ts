@@ -1,6 +1,7 @@
 import { loadDemandForPricingSheet } from "@/lib/demandSheet";
 import { applySkuCostComponents } from "@/lib/skuCostComponents";
 import { addDaysISO } from "@/lib/pricingSheetCache";
+import { applyComboGrnPerKgOverride, COMBO_GRN_KG_TARGET_FSN } from "@/lib/comboGrnKg";
 import {
   supabase,
   type PriceSheetDetailRow,
@@ -28,10 +29,14 @@ const MYSQL_FRESH_COLUMNS = new Set([
   "t3_grn_price_per_unit",
 ] as const);
 
-/** Only Quoted PP is copied from the prior day's sheet (matched on fsn_id + weight_unit). Negotiated PP must be entered on this sheet. */
+/** Only Quoted PP is copied from the prior day's sheet. Negotiated PP must be entered on this sheet. */
 const CARRY_FORWARD_COLUMNS: (keyof PriceSheetDetailRow)[] = [
   "quoted_pp",
 ];
+
+function isQuotedPpMissing(value: number | null | undefined): boolean {
+  return value == null || value === 0;
+}
 
 function detailLineKey(fsnId: string | null | undefined, weightUnit: string | null | undefined) {
   return `${fsnId ?? ""}||${weightUnit ?? ""}`;
@@ -45,7 +50,7 @@ function displayNlcFromDetailRow(
   >,
 ): number | null {
   const costs = (d.pm_cost ?? 0) + (d.fml_dump ?? 0) + (d.pc ?? 0);
-  if (d.quoted_pp != null) return d.quoted_pp + costs;
+  if (d.quoted_pp != null && d.quoted_pp !== 0) return d.quoted_pp + costs;
   return null;
 }
 
@@ -188,7 +193,7 @@ async function fetchPreviousDayDetails(city: string, deliveryDate: string): Prom
   if (!prevHeader) return [];
   const { data, error } = await supabase
     .from("price_sheet_details")
-    .select("fsn_id,weight_unit,quoted_pp,negotiated_pp,nlc,pm_cost,fml_dump,pc")
+    .select("fsn_id,weight_unit,sku_id,quoted_pp,negotiated_pp,nlc,pm_cost,fml_dump,pc")
     .eq("price_sheet_id", prevHeader.price_sheet_id)
     .limit(5000);
   if (error) throw error;
@@ -238,6 +243,12 @@ function buildDetailFromMysqlAndPrev(
   if (prev) {
     for (const col of CARRY_FORWARD_COLUMNS) {
       const v = prev[col];
+      if (col === "quoted_pp") {
+        if (!isQuotedPpMissing(v as number | null | undefined)) {
+          detail.quoted_pp = v as number;
+        }
+        continue;
+      }
       if (v !== undefined && v !== null) {
         (detail as Record<string, unknown>)[col] = v;
       }
@@ -271,6 +282,37 @@ async function insertDetailsInChunks(rows: Partial<PriceSheetDetailRow>[]): Prom
   return total;
 }
 
+async function persistComboGrnKgIfNeeded(
+  details: PriceSheetDetailRow[],
+): Promise<PriceSheetDetailRow[]> {
+  if (details.length === 0) return details;
+  const next = applyComboGrnPerKgOverride(details);
+  const writes: Array<Promise<unknown>> = [];
+  for (let i = 0; i < details.length; i++) {
+    const before = details[i]!;
+    const after = next[i]!;
+    if (String(before.fsn_id ?? "").trim() !== COMBO_GRN_KG_TARGET_FSN) continue;
+    const beforeKg = before.grn_price_per_kg == null ? null : Number(before.grn_price_per_kg);
+    const afterKg = after.grn_price_per_kg == null ? null : Number(after.grn_price_per_kg);
+    if (afterKg == null) continue;
+    if (beforeKg != null && Math.abs(beforeKg - afterKg) < 0.005) continue;
+    const id = before.price_sheet_details_id ?? before.id;
+    if (!id) continue;
+    writes.push(
+      supabase
+        .from("price_sheet_details")
+        .update({
+          grn_price_per_kg: afterKg,
+          grn_price_per_unit: after.grn_price_per_unit ?? afterKg,
+        })
+        .eq("price_sheet_details_id", id),
+    );
+  }
+  if (writes.length === 0) return next;
+  await Promise.all(writes);
+  return fetchPriceSheetDetails(details[0]!.price_sheet_id);
+}
+
 export type LoadPriceSheetResult = {
   header: PriceSheetHeader;
   rows: PricingSheetRow[];
@@ -289,7 +331,9 @@ export async function loadOrCreatePriceSheet(
 
   const existing = await fetchPriceSheetHeader(city, deliveryDate);
   if (existing) {
-    const details = await fetchPriceSheetDetails(existing.price_sheet_id);
+    const details = await persistComboGrnKgIfNeeded(
+      await fetchPriceSheetDetails(existing.price_sheet_id),
+    );
     let rows = mergeHeaderAndDetails(existing, details);
     rows = await applySkuCostComponents(rows);
     rows = await enrichRowsWithPreviousDayNlc(rows, city, deliveryDate);
@@ -322,16 +366,35 @@ export async function loadOrCreatePriceSheet(
   if (headerErr) throw headerErr;
 
   const prevDetails = await fetchPreviousDayDetails(city, deliveryDate);
-  const prevMap = new Map(
+  const prevByLine = new Map(
     prevDetails.map((d) => [detailLineKey(d.fsn_id, d.weight_unit), d]),
   );
+  const prevByFsn = new Map<string, PriceSheetDetailRow>();
+  const prevBySku = new Map<string, PriceSheetDetailRow>();
+  for (const d of prevDetails) {
+    const fsn = String(d.fsn_id ?? "").trim();
+    if (fsn && !prevByFsn.has(fsn) && !isQuotedPpMissing(d.quoted_pp)) {
+      prevByFsn.set(fsn, d);
+    }
+    const sku = String(d.sku_id ?? "").trim();
+    if (sku && !prevBySku.has(sku) && !isQuotedPpMissing(d.quoted_pp)) {
+      prevBySku.set(sku, d);
+    }
+  }
 
-  const detailPayload = mysqlRows
-    .filter((r) => r.sku_id)
-    .map((mysqlRow) => {
-      const prev = prevMap.get(detailLineKey(mysqlRow.fsn_id, mysqlRow.weight_unit));
-      return buildDetailFromMysqlAndPrev(mysqlRow, prev, header.price_sheet_id);
-    });
+  const detailPayload = applyComboGrnPerKgOverride(
+    mysqlRows
+      .filter((r) => r.sku_id)
+      .map((mysqlRow) => {
+        const fsn = String(mysqlRow.fsn_id ?? "").trim();
+        const sku = String(mysqlRow.sku_id ?? "").trim();
+        const prev =
+          prevByLine.get(detailLineKey(mysqlRow.fsn_id, mysqlRow.weight_unit)) ??
+          (fsn ? prevByFsn.get(fsn) : undefined) ??
+          (sku ? prevBySku.get(sku) : undefined);
+        return buildDetailFromMysqlAndPrev(mysqlRow, prev, header.price_sheet_id);
+      }),
+  );
 
   const enrichedPayload = await applySkuCostComponents(detailPayload);
   await insertDetailsInChunks(enrichedPayload);
@@ -389,7 +452,9 @@ export async function upsertPriceSheetDetails(
   payload: Partial<PriceSheetDetailRow>[],
 ): Promise<number> {
   if (payload.length === 0) return 0;
-  const withSheet = payload.map((p) => ({ ...p, price_sheet_id: priceSheetId }));
+  const withSheet = applyComboGrnPerKgOverride(
+    payload.map((p) => ({ ...p, price_sheet_id: priceSheetId })),
+  );
   const chunkSize = 500;
   let total = 0;
   for (let i = 0; i < withSheet.length; i += chunkSize) {
@@ -400,6 +465,7 @@ export async function upsertPriceSheetDetails(
     if (error) throw error;
     total += count ?? chunk.length;
   }
+  await persistComboGrnKgIfNeeded(await fetchPriceSheetDetails(priceSheetId));
   return total;
 }
 

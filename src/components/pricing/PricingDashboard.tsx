@@ -427,12 +427,17 @@ function Tip({ text, children }: { text: string; children: React.ReactNode }) {
 
 // ---------- Sort header ----------
 
+function skuRowKey(row: { fsnId: string; dbWeightUnit?: string | null; weightUnit: string }) {
+  return auditRowKey(row.fsnId, row.dbWeightUnit ?? row.weightUnit);
+}
+
 function enrichedRowKey(e: { row: { fsnId: string; dbWeightUnit?: string | null; weightUnit: string } }) {
-  return auditRowKey(e.row.fsnId, e.row.dbWeightUnit ?? e.row.weightUnit);
+  return skuRowKey(e.row);
 }
 
 function getMainPricingSortValue(e: { row: SkuRow; calc: ReturnType<typeof deriveRow> }, sortKey: string): number | string {
   switch (sortKey) {
+    case "ncSkuName": return e.row.ncSkuName || "";
     case "demandUnits": return e.row.demandUnits;
     case "totalDemandPct": return e.calc.totalDemandPct;
     case "piMixPct": return e.row.piMixPct;
@@ -591,6 +596,9 @@ export function PricingDashboard() {
   const [expandedAuditKey, setExpandedAuditKey] = useState<string | null>(null);
   const [auditHistoryByKey, setAuditHistoryByKey] = useState<Record<string, PricingSheetAuditRow[]>>({});
   const [auditLoadingKey, setAuditLoadingKey] = useState<string | null>(null);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<Set<string>>(() => new Set());
+  const [formulaSelectSourceKey, setFormulaSelectSourceKey] = useState<string | null>(null);
+  const formulaSelectMode = formulaSelectSourceKey !== null;
 
   const toggleRowAudit = useCallback(
     async (fsnId: string, weightUnit: string) => {
@@ -644,6 +652,8 @@ export function PricingDashboard() {
     setExpandedAuditKey(null);
     setAuditHistoryByKey({});
     setAuditLoadingKey(null);
+    setSelectedRowKeys(new Set());
+    setFormulaSelectSourceKey(null);
   }, [city, deliveryDate]);
 
   useEffect(() => {
@@ -748,6 +758,89 @@ export function PricingDashboard() {
   useEffect(() => {
     resetSort();
   }, [city, deliveryDate, resetSort]);
+
+  useEffect(() => {
+    setSelectedRowKeys((prev) => {
+      if (prev.size === 0) return prev;
+      const valid = new Set(rows.map(skuRowKey));
+      let changed = false;
+      const next = new Set<string>();
+      for (const k of prev) {
+        if (valid.has(k)) next.add(k);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [rows]);
+
+  const visibleRowKeys = useMemo(() => sorted.map(enrichedRowKey), [sorted]);
+  const selectedVisibleRows = useMemo(
+    () => sorted.filter((e) => selectedRowKeys.has(enrichedRowKey(e))).map((e) => e.row),
+    [sorted, selectedRowKeys],
+  );
+
+  const toggleRowSelected = useCallback((key: string) => {
+    setSelectedRowKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        if (next.size <= 1) return prev;
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleAllVisibleRows = useCallback(() => {
+    setSelectedRowKeys((prev) => {
+      const allOn = visibleRowKeys.length > 0 && visibleRowKeys.every((k) => prev.has(k));
+      if (allOn) {
+        return formulaSelectSourceKey ? new Set([formulaSelectSourceKey]) : new Set();
+      }
+      return new Set(visibleRowKeys);
+    });
+  }, [visibleRowKeys, formulaSelectSourceKey]);
+
+  const startFormulaRowSelect = useCallback((sourceKey: string) => {
+    setFormulaSelectSourceKey(sourceKey);
+    setSelectedRowKeys(new Set([sourceKey]));
+  }, []);
+
+  const endFormulaRowSelect = useCallback(() => {
+    setFormulaSelectSourceKey(null);
+    setSelectedRowKeys(new Set());
+  }, []);
+
+  const selectOnlyFormulaSource = useCallback(() => {
+    setSelectedRowKeys((prev) => {
+      if (!formulaSelectSourceKey) return prev;
+      return new Set([formulaSelectSourceKey]);
+    });
+  }, [formulaSelectSourceKey]);
+
+  const applyQuotedPpUpdates = useCallback((updates: { key: string; quotedPp: number }[]) => {
+    if (updates.length === 0) return;
+    const byKey = new Map(updates.map((u) => [u.key, u.quotedPp]));
+    setRows((rs) =>
+      rs.map((r) => {
+        const v = byKey.get(skuRowKey(r));
+        if (v === undefined) return r;
+        return {
+          ...r,
+          quotedPp: v,
+          quotedPpIsSet: true,
+          quotedTouched: true,
+          quotedLocked: false,
+        };
+      }),
+    );
+    if (updates.length > 1) {
+      void import("sonner").then(({ toast }) =>
+        toast.success(`Quoted PP set on ${updates.length} selected rows. Lock a row to save.`),
+      );
+    }
+  }, []);
 
   const averages = useMemo(() => computePriceUploadAverages(enriched), [enriched]);
 
@@ -1570,7 +1663,7 @@ export function PricingDashboard() {
             <div
               className={`overflow-auto ${sheetFullscreen ? "min-h-0 flex-1" : "max-h-[calc(100vh-14rem)]"}`}
             >
-            <div className="flex w-max min-w-full" style={{ zoom: tableZoom / 100 }}>
+            <div className="flex w-max min-w-full" style={{ zoom: tableZoom / 100 }} data-pricing-sheet>
               {/* Frozen — immovable on horizontal scroll; width adjustable via edge handle */}
               <div
                 className="relative sticky left-0 z-30 shrink-0 border-r-2 border-border bg-card"
@@ -1586,6 +1679,9 @@ export function PricingDashboard() {
                   auditHistoryByKey={auditHistoryByKey}
                   auditLoadingKey={auditLoadingKey}
                   onToggleAudit={toggleRowAudit}
+                  formulaSelectMode={formulaSelectMode}
+                  selectedRowKeys={selectedRowKeys}
+                  onToggleRow={toggleRowSelected}
                 />
                 <FrozenPaneResizeHandle
                   scale={tableZoom / 100}
@@ -1608,6 +1704,15 @@ export function PricingDashboard() {
                   expandedAuditKey={expandedAuditKey}
                   auditHistoryByKey={auditHistoryByKey}
                   auditLoadingKey={auditLoadingKey}
+                  selectedRowKeys={selectedRowKeys}
+                  selectedRows={selectedVisibleRows}
+                  formulaSelectMode={formulaSelectMode}
+                  formulaSelectSourceKey={formulaSelectSourceKey}
+                  onApplyQuotedPp={applyQuotedPpUpdates}
+                  onBulkSelectStart={startFormulaRowSelect}
+                  onBulkSelectEnd={endFormulaRowSelect}
+                  onSelectAllVisible={toggleAllVisibleRows}
+                  onSelectOnlySource={selectOnlyFormulaSource}
                 />
               </div>
             </div>
@@ -2002,6 +2107,7 @@ function GroupBar({ children, className = "" }: { children: React.ReactNode; cla
 function FrozenTable({
   rows, sortKey, sortDir, toggleSort, averages,
   expandedAuditKey, auditHistoryByKey, auditLoadingKey, onToggleAudit,
+  formulaSelectMode, selectedRowKeys, onToggleRow,
 }: {
   rows: Enriched[]; sortKey: string | null; sortDir: SortDir; toggleSort: (k: string) => void;
   averages: ReturnType<typeof computePriceUploadAverages>;
@@ -2009,6 +2115,9 @@ function FrozenTable({
   auditHistoryByKey: Record<string, PricingSheetAuditRow[]>;
   auditLoadingKey: string | null;
   onToggleAudit: (fsnId: string, weightUnit: string) => void;
+  formulaSelectMode: boolean;
+  selectedRowKeys: Set<string>;
+  onToggleRow: (key: string) => void;
 }) {
   return (
     <table className="w-full table-fixed border-collapse text-[12px] [&_th]:box-border [&_td]:box-border [&_th]:overflow-hidden [&_td]:overflow-hidden [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
@@ -2036,29 +2145,49 @@ function FrozenTable({
           const negGm = calc.gm !== null && calc.gm < 0;
           const highDefl = isDeflectionOutOfRange(calc.deflectionPct);
           const unlocked = hasUnlockedCell(row);
-          const rowCls = [
-            unlocked ? "bg-yellow-50 hover:bg-yellow-100/80" : "hover:bg-muted/40",
-            negPi || negGm
-              ? "border-l-4 border-l-red-500"
-              : highDefl
-              ? "border-l-4 border-l-amber-500"
-              : "",
-          ].filter(Boolean).join(" ");
           const key = auditRowKey(row.fsnId, row.dbWeightUnit ?? row.weightUnit);
           const expanded = expandedAuditKey === key;
           const history = auditHistoryByKey[key] ?? [];
           const loading = auditLoadingKey === key;
+          const selected = formulaSelectMode && selectedRowKeys.has(key);
+          const rowCls = [
+            formulaSelectMode && selected
+              ? "bg-primary/[0.07] hover:bg-primary/10"
+              : unlocked
+              ? "bg-yellow-50 hover:bg-yellow-100/80"
+              : "hover:bg-muted/40",
+            formulaSelectMode ? "cursor-pointer" : "",
+            !formulaSelectMode && (negPi || negGm)
+              ? "border-l-4 border-l-red-500"
+              : !formulaSelectMode && highDefl
+              ? "border-l-4 border-l-amber-500"
+              : formulaSelectMode && selected
+              ? "border-l-2 border-l-primary/50"
+              : "",
+          ].filter(Boolean).join(" ");
           return (
             <Fragment key={row.fsnId}>
-              <tr className={`${ROW_H} border-b last:border-b-0 ${rowCls}`}>
+              <tr
+                className={`${ROW_H} border-b last:border-b-0 ${rowCls}`}
+                data-formula-row-select={formulaSelectMode ? "" : undefined}
+                onClick={formulaSelectMode ? () => onToggleRow(key) : undefined}
+              >
                 <td title={row.fsnId} className="truncate px-2 font-mono text-[11px] text-muted-foreground">
-                  <div className="flex min-w-0 items-center gap-0.5">
+                  <div className="flex min-w-0 items-center gap-1">
+                    {formulaSelectMode && (
+                      <span
+                        aria-hidden
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                          selected ? "bg-primary" : "bg-muted-foreground/20"
+                        }`}
+                      />
+                    )}
                     <RowAuditExpandButton
                       fsnId={row.fsnId}
                       expanded={expanded}
                       onToggle={() => onToggleAudit(row.fsnId, row.weightUnit)}
                     />
-                    <span className="min-w-0 truncate">{row.fsnId}</span>
+                    <span className={`min-w-0 truncate ${selected ? "text-foreground" : ""}`}>{row.fsnId}</span>
                   </div>
                 </td>
                 <td title={row.weightUnit} className="truncate px-2 text-muted-foreground">{row.weightUnit}</td>
@@ -2106,6 +2235,8 @@ function FrozenTable({
 function ScrollTable({
   rows, sortKey, sortDir, toggleSort, averages, updateRowLocal, persistRowFields, submitted,
   expandedAuditKey, auditHistoryByKey, auditLoadingKey,
+  selectedRowKeys, selectedRows, formulaSelectMode, formulaSelectSourceKey,
+  onApplyQuotedPp, onBulkSelectStart, onBulkSelectEnd, onSelectAllVisible, onSelectOnlySource,
 }: {
   rows: Enriched[];
   sortKey: string | null;
@@ -2118,6 +2249,15 @@ function ScrollTable({
   expandedAuditKey: string | null;
   auditHistoryByKey: Record<string, PricingSheetAuditRow[]>;
   auditLoadingKey: string | null;
+  selectedRowKeys: Set<string>;
+  selectedRows: SkuRow[];
+  formulaSelectMode: boolean;
+  formulaSelectSourceKey: string | null;
+  onApplyQuotedPp: (updates: { key: string; quotedPp: number }[]) => void;
+  onBulkSelectStart: (sourceKey: string) => void;
+  onBulkSelectEnd: () => void;
+  onSelectAllVisible: () => void;
+  onSelectOnlySource: () => void;
 }) {
   return (
     <table className="min-w-[2080px] border-collapse text-[12px] [&_th]:box-border [&_td]:box-border [&_th]:overflow-hidden [&_td]:overflow-hidden [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
@@ -2140,7 +2280,7 @@ function ScrollTable({
 
         <tr className={`${COL_HEAD_H} border-b`}>
           {/* Basic Info (scrollable) */}
-          <th title="NC SKU Name" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>NC SKU Name</th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader label="NC SKU Name" active={sortKey==="ncSkuName"} dir={sortDir} onClick={() => toggleSort("ncSkuName")} /></th>
           <th title="Special Tags" className={`${STICKY_COL} ${HEAD_TH} truncate border-l bg-card px-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Special Tags</th>
           <th title="Subcategory" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Subcategory</th>
           <th title="Conv. Factor" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Conv. Factor</th>
@@ -2208,9 +2348,16 @@ function ScrollTable({
           const expanded = expandedAuditKey === key;
           const history = auditHistoryByKey[key] ?? [];
           const loading = auditLoadingKey === key;
+          const selected = formulaSelectMode && selectedRowKeys.has(key);
           return (
             <Fragment key={row.fsnId}>
-            <tr className={`${ROW_H} border-b last:border-b-0 ${unlocked ? "bg-yellow-50 hover:bg-yellow-100/80" : "hover:bg-muted/40"}`}>
+            <tr className={`${ROW_H} border-b last:border-b-0 ${
+              formulaSelectMode && selected
+                ? "bg-primary/[0.07] hover:bg-primary/10"
+                : unlocked
+                ? "bg-yellow-50 hover:bg-yellow-100/80"
+                : "hover:bg-muted/40"
+            }`}>
               {/* Basic Info (scrollable) */}
               <td className="max-w-[200px] truncate px-2 text-[11px]">{row.ncSkuName || "—"}</td>
               <td className="border-l px-2">
@@ -2334,14 +2481,13 @@ function ScrollTable({
                 <div className="flex items-center justify-end gap-1">
                   <QuotedPpFormulaButton
                     row={row}
-                    disabled={submitted}
-                    locked={row.quotedLocked}
-                    onUnlock={() => updateRowLocal(row.fsnId, { quotedLocked: false })}
-                    onApply={(v) => {
-                      const next: Partial<SkuRow> = { quotedPp: v, quotedPpIsSet: true, quotedTouched: true };
-                      setPartialIfNegotiatedFollows(next, row, v);
-                      updateRowLocal(row.fsnId, next);
-                    }}
+                    disabled={submitted || (formulaSelectMode && formulaSelectSourceKey !== key)}
+                    selectedRows={selectedRows}
+                    onApply={onApplyQuotedPp}
+                    onBulkSelectStart={onBulkSelectStart}
+                    onBulkSelectEnd={onBulkSelectEnd}
+                    onSelectAllVisible={onSelectAllVisible}
+                    onSelectOnlySource={onSelectOnlySource}
                   />
                   <LockedPriceInput
                     value={row.quotedPp}
@@ -2524,12 +2670,14 @@ const QUOTED_PP_FORMULA_OPTIONS: {
   label: string;
   inputLabel: string;
   requirePositive: boolean;
+  supportsBulk?: boolean;
 }[] = [
   {
     id: "higher_grn",
     label: "Show a higher GRN price to FK",
     inputLabel: "Higher GRN price to show FK",
     requirePositive: true,
+    supportsBulk: true,
   },
   {
     id: "target_nlc",
@@ -2674,15 +2822,21 @@ function useFormulaPanelPosition(
 function QuotedPpFormulaButton({
   row,
   disabled,
-  locked,
-  onUnlock,
+  selectedRows,
   onApply,
+  onBulkSelectStart,
+  onBulkSelectEnd,
+  onSelectAllVisible,
+  onSelectOnlySource,
 }: {
-  row: QuotedPpFormulaRow;
+  row: QuotedPpFormulaRow & Pick<SkuRow, "fsnId" | "dbWeightUnit" | "weightUnit">;
   disabled?: boolean;
-  locked: boolean;
-  onUnlock: () => void;
-  onApply: (quotedPp: number) => void;
+  selectedRows: SkuRow[];
+  onApply: (updates: { key: string; quotedPp: number }[]) => void;
+  onBulkSelectStart: (sourceKey: string) => void;
+  onBulkSelectEnd: () => void;
+  onSelectAllVisible: () => void;
+  onSelectOnlySource: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState<QuotedPpFormulaKind | null>(null);
@@ -2690,13 +2844,18 @@ function QuotedPpFormulaButton({
   const [error, setError] = useState<string | null>(null);
   const anchorRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const sourceKey = skuRowKey(row);
 
   const selected = QUOTED_PP_FORMULA_OPTIONS.find((o) => o.id === kind) ?? null;
+  const bulkEnabled = !!selected?.supportsBulk;
+  const bulkTargets = bulkEnabled && selectedRows.length > 0 ? selectedRows : [row];
+  const bulkCount = bulkTargets.length;
 
   const reset = () => {
     setKind(null);
     setDraft("");
     setError(null);
+    onBulkSelectEnd();
   };
 
   const close = () => {
@@ -2704,11 +2863,20 @@ function QuotedPpFormulaButton({
     reset();
   };
 
+  const pickKind = (id: QuotedPpFormulaKind) => {
+    setKind(id);
+    setDraft("");
+    setError(null);
+    const opt = QUOTED_PP_FORMULA_OPTIONS.find((o) => o.id === id);
+    if (opt?.supportsBulk) onBulkSelectStart(sourceKey);
+    else onBulkSelectEnd();
+  };
+
   const panelStyle = useFormulaPanelPosition(
     open,
     anchorRef,
     panelRef,
-    `${kind ?? "select"}:${error ?? ""}`,
+    `${kind ?? "select"}:${error ?? ""}:${bulkCount}`,
   );
 
   useEffect(() => {
@@ -2721,6 +2889,13 @@ function QuotedPpFormulaButton({
       if (!(target instanceof Node)) return;
       if (anchorRef.current?.contains(target)) return;
       if (panelRef.current?.contains(target)) return;
+      if (
+        kind === "higher_grn" &&
+        target instanceof Element &&
+        target.closest("[data-pricing-sheet]")
+      ) {
+        return;
+      }
       close();
     };
     window.addEventListener("keydown", onKeyDown);
@@ -2729,7 +2904,7 @@ function QuotedPpFormulaButton({
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("mousedown", onPointerDown);
     };
-  }, [open]);
+  }, [open, kind]);
 
   const handleDraftChange = (raw: string) => {
     setDraft(raw);
@@ -2738,13 +2913,21 @@ function QuotedPpFormulaButton({
 
   const handleApply = () => {
     if (!kind) return;
-    const resolved = resolveQuotedPpFromX(kind, draft, row);
-    if ("error" in resolved) {
-      setError(resolved.error);
+    const updates: { key: string; quotedPp: number }[] = [];
+    let firstError: string | null = null;
+    for (const target of bulkTargets) {
+      const resolved = resolveQuotedPpFromX(kind, draft, target);
+      if ("error" in resolved) {
+        if (!firstError) firstError = resolved.error;
+        continue;
+      }
+      updates.push({ key: skuRowKey(target), quotedPp: resolved.value });
+    }
+    if (updates.length === 0) {
+      setError(firstError ?? "Could not apply formula");
       return;
     }
-    if (locked) onUnlock();
-    onApply(resolved.value);
+    onApply(updates);
     close();
   };
 
@@ -2765,11 +2948,7 @@ function QuotedPpFormulaButton({
               <button
                 key={opt.id}
                 type="button"
-                onClick={() => {
-                  setKind(opt.id);
-                  setDraft("");
-                  setError(null);
-                }}
+                onClick={() => pickKind(opt.id)}
                 className="rounded-sm border border-input bg-card px-2.5 py-2 text-left text-[12px] leading-snug text-foreground hover:bg-accent"
               >
                 {opt.label}
@@ -2797,6 +2976,30 @@ function QuotedPpFormulaButton({
             Back
           </button>
           <p className="text-[11px] font-medium text-foreground">{selected.label}</p>
+          {bulkEnabled && (
+            <div className="space-y-1.5 rounded-sm bg-muted/50 px-2 py-1.5">
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                Click rows on the left to include them. Same input applies to each
+                {bulkCount > 1 ? ` · ${bulkCount} selected` : ""}.
+              </p>
+              <div className="flex flex-wrap gap-x-2 gap-y-0.5">
+                <button
+                  type="button"
+                  onClick={onSelectAllVisible}
+                  className="text-[11px] text-primary hover:underline"
+                >
+                  All visible
+                </button>
+                <button
+                  type="button"
+                  onClick={onSelectOnlySource}
+                  className="text-[11px] text-primary hover:underline"
+                >
+                  This row only
+                </button>
+              </div>
+            </div>
+          )}
           <label className="block space-y-1">
             <span className="text-[11px] text-muted-foreground">{selected.inputLabel}</span>
             <input
@@ -2835,7 +3038,7 @@ function QuotedPpFormulaButton({
               onClick={handleApply}
               className="h-7 rounded-sm border border-primary/30 bg-primary px-2.5 text-[12px] font-medium text-primary-foreground hover:bg-primary/90"
             >
-              Apply
+              {selected.supportsBulk && bulkCount > 1 ? `Apply to ${bulkCount} rows` : "Apply"}
             </button>
           </div>
         </div>

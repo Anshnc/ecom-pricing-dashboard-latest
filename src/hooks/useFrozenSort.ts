@@ -58,7 +58,14 @@ export function useFrozenSort<T>(
 
   const toggleSort = useCallback(
     (key: string) => {
-      const newDir: SortDir = sortKey === key ? (sortDir === "asc" ? "desc" : "asc") : "asc";
+      // Same column: unsorted → A–Z/asc → Z–A/desc → unsorted.
+      if (sortKey === key && sortDir === "desc") {
+        setSortKey(null);
+        setSortDir(null);
+        setFrozenSortOrder(null);
+        return;
+      }
+      const newDir: SortDir = sortKey === key && sortDir === "asc" ? "desc" : "asc";
       setSortKey(key);
       setSortDir(newDir);
       setFrozenSortOrder(
