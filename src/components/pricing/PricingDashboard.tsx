@@ -17,6 +17,7 @@ import { useSubcategories } from "@/hooks/useSubcategories";
 import { useGuardrails } from "@/hooks/useGuardrails";
 import { parseCSV, toNum, toInt } from "@/lib/csv";
 import { parseBulkPriceUpdates, type BulkUpdate } from "@/lib/bulkPriceUpload";
+import { parseBlinkitSpUpload, pairBlinkitSpBySequence } from "@/lib/blinkitSpUpload";
 import { fsnWeightKey, loadFsnWeightUnitMap } from "@/lib/fsnWeightUnit";
 import {
   ChevronUp,
@@ -592,6 +593,7 @@ export function PricingDashboard() {
     setSheetCreated(false);
   }, [city, deliveryDate]);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [bkspOpen, setBkspOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [status, setStatus] = useState<"draft" | "created" | "pending" | "approved" | "rejected" | "modification">("draft");
@@ -1124,6 +1126,90 @@ export function PricingDashboard() {
     }
   };
 
+  const runBlinkitSpUpload = async (text: string) => {
+    const fileRows = parseBlinkitSpUpload(text);
+    if (fileRows.length === 0) {
+      const { toast } = await import("sonner");
+      toast.error("No valid rows. Need columns FSN and Blinkit SP.");
+      return;
+    }
+
+    const sheet = sorted.map((e) => e.row);
+    const paired = pairBlinkitSpBySequence(
+      fileRows,
+      sheet.map((r) => r.fsnId),
+    );
+    const jobs = paired.pairs.map((p) => ({ row: sheet[p.sheetIndex]!, blinkitSp: p.blinkitSp }));
+    if (jobs.length === 0) {
+      const { toast } = await import("sonner");
+      toast.error(
+        paired.fsnMismatch > 0
+          ? `FSN order does not match the current sheet (${paired.fsnMismatch} mismatch). Download CSV and keep the same row order.`
+          : "No Blinkit SP values to apply",
+      );
+      return;
+    }
+
+    setRows((rs) => {
+      const byKey = new Map(jobs.map((j) => [`${j.row.fsnId}||${j.row.weightUnit}`, j.blinkitSp]));
+      return rs.map((r) => {
+        const sp = byKey.get(`${r.fsnId}||${r.weightUnit}`);
+        return sp === undefined ? r : { ...r, blinkitSp: sp };
+      });
+    });
+
+    const { toast } = await import("sonner");
+    const toastId = `bksp-${Date.now()}`;
+    const total = jobs.length;
+    toast.loading(`Saving Blinkit SP 0 / ${total}…`, { id: toastId });
+
+    let failed = 0;
+    let done = 0;
+    for (const j of jobs) {
+      try {
+        await dbUpdateRow(
+          {
+            id: j.row.rowId,
+            fsn_id: j.row.fsnId,
+            weight_unit: j.row.dbWeightUnit ?? j.row.weightUnit ?? null,
+          },
+          { blinkit_sp: j.blinkitSp },
+        );
+      } catch {
+        failed += 1;
+      }
+      done += 1;
+      if (done % 5 === 0 || done === total) {
+        toast.loading(`Saving Blinkit SP ${done} / ${total}…`, { id: toastId });
+      }
+    }
+
+    try {
+      await dbRefetch();
+    } catch (e) {
+      console.warn("Sheet reload after Blinkit SP upload failed:", e);
+    }
+
+    const extra = [
+      paired.fsnMismatch > 0 ? `${paired.fsnMismatch} FSN/order skipped` : "",
+      paired.skippedEmpty > 0 ? `${paired.skippedEmpty} blank SP skipped` : "",
+      paired.extraFile > 0 ? `${paired.extraFile} extra file rows ignored` : "",
+    ]
+      .filter(Boolean)
+      .join(". ");
+
+    if (failed === 0) {
+      toast.success(
+        `Updated Blinkit SP on ${total} rows.${extra ? ` ${extra}.` : ""} PI% and BK Value Mix were recalculated.`,
+        { id: toastId },
+      );
+    } else {
+      toast.error(`Saved ${total - failed} / ${total} Blinkit SP rows.${extra ? ` ${extra}.` : ""}`, {
+        id: toastId,
+      });
+    }
+  };
+
   const anyUnlockedEdit = rows.some(hasUnlockedCell);
   const blockedBySuggestion = rows.some(
     (r) => r.suggestedPp !== null && (!r.negotiatedLocked || r.negotiatedPp === r.lastLockedNegotiated && r.suggestionAcknowledgedAt === 0)
@@ -1469,6 +1555,13 @@ export function PricingDashboard() {
               >
                 <Upload className="h-3.5 w-3.5" /> Bulk Upload
               </button>
+              <button
+                disabled={submitted}
+                onClick={() => setBkspOpen(true)}
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input bg-background px-3 text-[12px] font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Upload className="h-3.5 w-3.5" /> Upload BKSP
+              </button>
             </div>
             <div className="flex flex-col items-end gap-2">
               {status !== "draft" && (() => {
@@ -1790,6 +1883,16 @@ export function PricingDashboard() {
         />
       )}
 
+      {bkspOpen && (
+        <BlinkitSpUploadModal
+          onClose={() => setBkspOpen(false)}
+          onApply={async (text) => {
+            setBkspOpen(false);
+            await runBlinkitSpUpload(text);
+          }}
+        />
+      )}
+
       {/* Confirm submit */}
       {confirmOpen && (
         <Modal onClose={() => setConfirmOpen(false)} title="Submit for approval?">
@@ -1902,7 +2005,56 @@ function BulkUploadModal({
   );
 }
 
-
+function BlinkitSpUploadModal({
+  onClose,
+  onApply,
+}: {
+  onClose: () => void;
+  onApply: (text: string) => void | Promise<void>;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!file) return;
+    setBusy(true);
+    try {
+      await onApply(await file.text());
+    } catch (e) {
+      const { toast } = await import("sonner");
+      toast.error(`Upload failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal onClose={onClose} title="Upload BKSP">
+      <p className="text-[12px] text-muted-foreground">
+        CSV with <code>FSN</code> and <code>Blinkit SP</code> in the same row order as{" "}
+        <strong>Download CSV</strong>. Duplicate FSNs (different packs) are updated in that
+        sequence. Existing Blinkit SP is overwritten. Blank cells are skipped. Quoted PP, NLC, and
+        GM are not changed — PI% and BK Value Mix recalculate after save.
+      </p>
+      <input
+        type="file"
+        accept=".csv,text/csv"
+        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+        className="mt-3 block w-full text-[12px]"
+      />
+      <div className="mt-4 flex justify-end gap-2">
+        <button onClick={onClose} className="h-8 rounded-md border border-input px-3 text-[12px] hover:bg-muted">
+          Cancel
+        </button>
+        <button
+          onClick={submit}
+          disabled={!file || busy}
+          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+        >
+          {busy ? "Applying…" : "Apply"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
 
 // ---------- Sub Category Metrics ----------
 const SUBCATEGORY_LIST = [
