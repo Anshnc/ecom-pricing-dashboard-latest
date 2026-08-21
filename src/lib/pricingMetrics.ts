@@ -176,6 +176,34 @@ export function displayNlcIsPresent(row: {
   return quotedPpIsPresent(row);
 }
 
+/**
+ * Excel SUMPRODUCT($H:$H, col) / $H1.
+ * Denominator is SUM of every row’s Total Demand % (H1), including blank/0 value rows.
+ * Missing values count as 0 in the product, same as Excel.
+ */
+export function sumproductOverTotalMix(
+  rows: Array<{ mixPct: number; value: number | null | undefined }>,
+): number | null {
+  let weightedSum = 0;
+  let mixSum = 0;
+  for (const r of rows) {
+    mixSum += r.mixPct;
+    const v = r.value;
+    if (v === null || v === undefined || Number.isNaN(v)) continue;
+    weightedSum += v * r.mixPct;
+  }
+  return mixSum > 0 ? weightedSum / mixSum : null;
+}
+
+/** Averages-row GM = Avg NLC − Avg Total GRN ₹/unit. */
+export function avgGmFromNlcMinusGrn(
+  avgNlc: number | null,
+  avgTotalGrnPerUnit: number | null,
+): number | null {
+  if (avgNlc === null || avgTotalGrnPerUnit === null) return null;
+  return avgNlc - avgTotalGrnPerUnit;
+}
+
 /** Averages-row BK Value Mix = SUMPRODUCT(Total Demand %, Blinkit SP) / Σ Total Demand %. */
 export function bkValueMixDemandWeightedAvg(
   rows: Array<{ totalDemandPct: number; blinkitSp: number | null | undefined }>,
@@ -184,7 +212,7 @@ export function bkValueMixDemandWeightedAvg(
   let weightSum = 0;
   for (const r of rows) {
     const sp = r.blinkitSp;
-    if (sp === null || sp === undefined || Number.isNaN(sp)) continue;
+    if (sp === null || sp === undefined || Number.isNaN(sp) || sp === 0) continue;
     weightedSum += r.totalDemandPct * sp;
     weightSum += r.totalDemandPct;
   }
@@ -194,7 +222,7 @@ export function bkValueMixDemandWeightedAvg(
 /**
  * Price Upload Blinkit SP average: simple mean of SP on rows where
  * Blinkit SP and displayed NLC are both present. Denominator is that paired count only.
- * 0 is a real Blinkit SP; blank/NA SP or missing NLC is skipped.
+ * 0 Blinkit SP is treated as missing (not sold), same as blank/NA.
  */
 export function meanBlinkitSpWhenBothPresent(
   rows: Array<{
@@ -210,7 +238,7 @@ export function meanBlinkitSpWhenBothPresent(
   for (const r of rows) {
     if (!displayNlcIsPresent(r)) continue;
     const sp = r.blinkitSp;
-    if (sp === null || sp === undefined || Number.isNaN(sp)) continue;
+    if (sp === null || sp === undefined || Number.isNaN(sp) || sp === 0) continue;
     sum += sp;
     n += 1;
   }

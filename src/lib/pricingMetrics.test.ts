@@ -1,4 +1,5 @@
 import {
+  avgGmFromNlcMinusGrn,
   avgPiPctFromBkspMix,
   bkValueMixDemandWeightedAvg,
   bkspTotalDemandPctFromParts,
@@ -13,6 +14,7 @@ import {
   quotedPpIsPresent,
   resolveGrnPerUnit,
   simpleMean,
+  sumproductOverTotalMix,
   totalGrnPerUnitFromParts,
 } from "./pricingMetrics";
 
@@ -187,8 +189,8 @@ assertClose(
     { blinkitSp: 100, quotedPp: 20, quotedPpIsSet: true, negotiatedPp: 20, negotiatedPpIsSet: true },
     { blinkitSp: 0, quotedPp: 10, quotedPpIsSet: true, negotiatedPp: 10, negotiatedPpIsSet: true },
   ]),
-  50,
-  "Blinkit SP average counts only paired NLC+SP rows; 0 SP still counts",
+  75,
+  "Blinkit SP average skips blank and 0 SP; only paired NLC+SP rows",
 );
 assertClose(
   meanBlinkitSpWhenBothPresent([
@@ -226,6 +228,32 @@ assertClose(
   null,
   "Avg PI% is null when SUM(bksp total demand%) is 0",
 );
+
+// Avg GRN/unit and NLC = SUMPRODUCT(Total Demand %, value) / SUM(all Total Demand %)
+assertClose(
+  sumproductOverTotalMix([
+    { mixPct: 60, value: 20 },
+    { mixPct: 40, value: 10 },
+  ]),
+  (20 * 60 + 10 * 40) / 100,
+  "SUMPRODUCT(mix, value) / total mix",
+);
+assertClose(
+  sumproductOverTotalMix([
+    { mixPct: 50, value: 20 },
+    { mixPct: 30, value: null },
+    { mixPct: 20, value: 0 },
+  ]),
+  (20 * 50 + 0 + 0) / 100,
+  "Blank/0 values add 0 to numerator; their mix still sits in H1",
+);
+assertClose(sumproductOverTotalMix([]), null, "SUMPRODUCT/H1 is null when there are no rows");
+assertClose(
+  avgGmFromNlcMinusGrn(34, 16),
+  18,
+  "Avg GM = Avg NLC − Avg Total GRN ₹/unit",
+);
+assertClose(avgGmFromNlcMinusGrn(null, 16), null, "Avg GM is null when Avg NLC is missing");
 
 // Negotiated PP is never part of NLC, even when it is set and differs from Quoted.
 const ignoresNeg = computeRowMetrics(

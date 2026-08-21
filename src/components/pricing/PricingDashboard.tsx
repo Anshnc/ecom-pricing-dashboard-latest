@@ -51,10 +51,12 @@ import {
 import { formatLocalISO, loadPricingSheetDemand, todayISO, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
 import { useFrozenSort, type SortDir } from "@/hooks/useFrozenSort";
 import {
+  avgGmFromNlcMinusGrn,
   avgPiPctFromBkspMix,
   bkValueMixDemandWeightedAvg,
   computeRowMetrics,
   meanBlinkitSpWhenBothPresent,
+  sumproductOverTotalMix,
 } from "@/lib/pricingMetrics";
 import { upsertFsnCostComponentsFromCsv, fetchFsnCostComponentsByFsns, parseFsnCostCsvRows } from "@/lib/skuCostComponents";
 import { RaasCheckTab } from "@/components/pricing/RaasCheckTab";
@@ -359,7 +361,8 @@ function weightedByDemandPct(
   let weightSum = 0;
   for (const e of enriched) {
     const v = getValue(e);
-    if (v === null || v === undefined) continue;
+    // Skip blank/NA and 0 so empty cells do not dilute the average.
+    if (v === null || v === undefined || Number.isNaN(v) || v === 0) continue;
     const w = e.calc.totalDemandPct;
     weightedSum += v * w;
     weightSum += w;
@@ -369,8 +372,14 @@ function weightedByDemandPct(
 
 /** Price Upload Averages — always computed over the full basket (all SKUs), never filtered rows. */
 function computePriceUploadAverages(enriched: Enriched[]) {
-  const wNlc = weightedByDemandPct(enriched, (e) => e.calc.nlc);
-  const wGrnPerUnit = weightedByDemandPct(enriched, (e) => e.calc.grnPerUnit);
+  const mixValue = (getValue: (e: Enriched) => number | null | undefined) =>
+    sumproductOverTotalMix(
+      enriched.map((e) => ({ mixPct: e.calc.totalDemandPct, value: getValue(e) })),
+    );
+  // Avg GRN ₹/unit, Avg Total GRN ₹/unit, Avg NLC = SUMPRODUCT(Total Demand %, col) / Σ Total Demand % (H1).
+  const wNlc = mixValue((e) => e.calc.nlc);
+  const wGrnPerUnit = mixValue((e) => e.calc.grnPerUnit);
+  const wTotalGrnPerUnit = mixValue((e) => e.calc.totalGrnPerUnit);
 
   return {
     demandUnits: plainSum(enriched, (e) => e.row.demandUnits),
@@ -398,14 +407,17 @@ function computePriceUploadAverages(enriched: Enriched[]) {
         blinkitSp: e.row.blinkitSp,
       })),
     ),
-    // Demand-weighted avg of row GM — not (avg NLC − avg GRN), which skews when GRN is missing on some rows.
-    gm: weightedByDemandPct(enriched, (e) => e.calc.gm),
+    gm: avgGmFromNlcMinusGrn(wNlc, wTotalGrnPerUnit),
     nlcValueMix: plainSum(enriched, (e) => e.calc.nlcValueMix),
     grnDiff: weightedByDemandPct(enriched, (e) => e.calc.grnDiff),
-    adjustedGrn: weightedByDemandPct(enriched, (e) => e.row.adjustedGrn ?? 0),
-    totalGrnPerUnit: weightedByDemandPct(enriched, (e) => e.calc.totalGrnPerUnit),
-    quotedPp: weightedByDemandPct(enriched, (e) => e.row.quotedPp),
-    negotiatedPp: weightedByDemandPct(enriched, (e) => e.row.negotiatedPp),
+    adjustedGrn: weightedByDemandPct(enriched, (e) => e.row.adjustedGrn ?? null),
+    totalGrnPerUnit: wTotalGrnPerUnit,
+    quotedPp: weightedByDemandPct(enriched, (e) =>
+      e.row.quotedPpIsSet === false ? null : e.row.quotedPp,
+    ),
+    negotiatedPp: weightedByDemandPct(enriched, (e) =>
+      e.row.negotiatedPpIsSet ? e.row.negotiatedPp : null,
+    ),
     suggestedPp: weightedByDemandPct(enriched, (e) => e.row.suggestedPp),
     grnMarkup: weightedByDemandPct(enriched, (e) => e.calc.grnMarkup),
   };
@@ -2289,10 +2301,10 @@ function ScrollTable({
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="NLC Value Mix" active={sortKey==="nlcValueMix"} dir={sortDir} onClick={() => toggleSort("nlcValueMix")} /></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="GRN ₹/kg" active={sortKey==="grnPricePerKg"} dir={sortDir} onClick={() => toggleSort("grnPricePerKg")} /></th>
           <th title="Prev Day GRN ₹/unit" className={`${STICKY_COL} ${HEAD_TH} bg-card px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}><Tip text="GRN ₹/unit on day T-n-1 (previous day). Read-only."><span className="block truncate">Prev Day GRN ₹/unit</span></Tip></th>
-          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="GRN ₹/unit" active={sortKey==="grnPerUnit"} dir={sortDir} onClick={() => toggleSort("grnPerUnit")} /></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Avg = SUMPRODUCT(Total Demand %, GRN ₹/unit) / Σ Total Demand %"><SortHeader align="right" label="GRN ₹/unit" active={sortKey==="grnPerUnit"} dir={sortDir} onClick={() => toggleSort("grnPerUnit")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Total GRN ₹/unit − Prev Day GRN ₹/unit"><SortHeader align="right" label="GRN Diff" active={sortKey==="grnDiff"} dir={sortDir} onClick={() => toggleSort("grnDiff")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Adjusted GRN" active={sortKey==="adjustedGrn"} dir={sortDir} onClick={() => toggleSort("adjustedGrn")} /></th>
-          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="(GRN ₹/kg + Adjusted GRN) × CF"><SortHeader align="right" label="Total GRN ₹/unit" active={sortKey==="totalGrnPerUnit"} dir={sortDir} onClick={() => toggleSort("totalGrnPerUnit")} /></Tip></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="(GRN ₹/kg + Adjusted GRN) × CF. Avg = SUMPRODUCT(Total Demand %, Total GRN ₹/unit) / Σ Total Demand %"><SortHeader align="right" label="Total GRN ₹/unit" active={sortKey==="totalGrnPerUnit"} dir={sortDir} onClick={() => toggleSort("totalGrnPerUnit")} /></Tip></th>
           {/* Benchmark Info */}
           <th className={`${STICKY_COL} ${HEAD_TH} border-l bg-card px-2`}><SortHeader align="right" label="Blinkit SP" active={sortKey==="blinkitSp"} dir={sortDir} onClick={() => toggleSort("blinkitSp")} /></th>
           <th title="WSP Trend" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-center text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>WSP Trend</th>
@@ -2300,9 +2312,9 @@ function ScrollTable({
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Quoted PP − Total GRN ₹/unit"><SortHeader align="right" label="GRN Markup" active={sortKey==="grnMarkup"} dir={sortDir} onClick={() => toggleSort("grnMarkup")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Negotiated PP" active={sortKey==="negotiatedPp"} dir={sortDir} onClick={() => toggleSort("negotiatedPp")} /></th>
           <th title="Suggested PP" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Suggested PP</th>
-          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="NLC" active={sortKey==="nlc"} dir={sortDir} onClick={() => toggleSort("nlc")} /></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Avg = SUMPRODUCT(Total Demand %, NLC) / Σ Total Demand %"><SortHeader align="right" label="NLC" active={sortKey==="nlc"} dir={sortDir} onClick={() => toggleSort("nlc")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Avg PI% = SUMPRODUCT(PI%, bksp total demand%) / SUM(bksp total demand%)"><SortHeader align="right" label="PI %" active={sortKey==="piPct"} dir={sortDir} onClick={() => toggleSort("piPct")} /></Tip></th>
-          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="GM" active={sortKey==="gm"} dir={sortDir} onClick={() => toggleSort("gm")} /></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Avg GM = Avg NLC − Avg Total GRN ₹/unit"><SortHeader align="right" label="GM" active={sortKey==="gm"} dir={sortDir} onClick={() => toggleSort("gm")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Deflection %" active={sortKey==="priceDeflectionPct"} dir={sortDir} onClick={() => toggleSort("priceDeflectionPct")} /></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="(Quoted PP − Total GRN ₹/unit) × Total Demand %"><SortHeader align="right" label="Impact PP Diff" active={sortKey==="impactPpDiff"} dir={sortDir} onClick={() => toggleSort("impactPpDiff")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Impact GM" active={sortKey==="impactGm"} dir={sortDir} onClick={() => toggleSort("impactGm")} /></th>
@@ -4072,21 +4084,22 @@ function PriceApprovalTab({
   );
 
   const avgs = useMemo(() => {
-    const valid = (arr: (number | null)[]) => arr.filter((x): x is number => x !== null);
+    const present = (arr: (number | null | undefined)[]) =>
+      arr.filter((x): x is number => x != null && !Number.isNaN(x) && x !== 0);
     const avg = (arr: number[]) => (arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null);
     const src = filtered;
     return {
-      totalDemandPct: avg(src.map((e) => e.calc.totalDemandPct)),
-      grnPerUnit: avg(valid(src.map((e) => e.calc.grnPerUnit))),
-      totalGrnPerUnit: avg(valid(src.map((e) => e.calc.totalGrnPerUnit))),
-      blinkitSp: avg(valid(src.map((e) => e.row.blinkitSp))),
-      quotedPp: avg(src.map((e) => e.row.quotedPp)),
-      negotiatedPp: avg(src.map((e) => e.row.negotiatedPp)),
-      suggestedPp: avg(valid(src.map((e) => e.row.approverSuggestedPp))),
-      nlc: avg(src.map((e) => e.calc.nlc)),
-      piPct: avg(valid(src.map((e) => e.calc.piPct))),
-      gm: avg(valid(src.map((e) => e.calc.gm))),
-      defl: avg(src.map((e) => e.calc.deflectionPct)),
+      totalDemandPct: avg(present(src.map((e) => e.calc.totalDemandPct))),
+      grnPerUnit: avg(present(src.map((e) => e.calc.grnPerUnit))),
+      totalGrnPerUnit: avg(present(src.map((e) => e.calc.totalGrnPerUnit))),
+      blinkitSp: avg(present(src.map((e) => e.row.blinkitSp))),
+      quotedPp: avg(present(src.map((e) => (e.row.quotedPpIsSet === false ? null : e.row.quotedPp)))),
+      negotiatedPp: avg(present(src.map((e) => (e.row.negotiatedPpIsSet ? e.row.negotiatedPp : null)))),
+      suggestedPp: avg(present(src.map((e) => e.row.approverSuggestedPp))),
+      nlc: avg(present(src.map((e) => e.calc.nlc))),
+      piPct: avg(present(src.map((e) => e.calc.piPct))),
+      gm: avg(present(src.map((e) => e.calc.gm))),
+      defl: avg(present(src.map((e) => e.calc.deflectionPct))),
     };
   }, [filtered]);
 
