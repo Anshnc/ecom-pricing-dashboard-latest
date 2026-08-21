@@ -11,8 +11,8 @@ import { supabase, type PricingSheetRow } from "@/lib/supabase";
  * Exhaustive value columns that can change from a lock (direct edit, UI cascade, or DB trigger).
  *
  * Dependency map (editable → auto-calculated):
- * - grn_price_per_kg → grn_price_per_unit, grn_diff, gm, impact_pp_diff, impact_gm
- * - adjusted_grn → total_grn, total_grn_per_unit, grn_diff, gm, impact_pp_diff, impact_gm
+ * - grn_price_per_kg → grn_price_per_unit, total_grn_per_unit, grn_diff, gm, impact_pp_diff, impact_gm
+ * - adjusted_grn → total_grn_per_unit, grn_diff, gm, impact_pp_diff, impact_gm
  * - blinkit_sp → pi_pct, pi_pct_quoted, pi_pct_negotiated, bk_value_mix
  * - quoted_pp → nlc, pi_pct, pi_pct_quoted, impact_pp_diff, impact_gm, gm
  * - negotiated_pp → nlc_negotiated, pi_pct_negotiated only (not grid NLC / GM / PI%)
@@ -20,6 +20,7 @@ import { supabase, type PricingSheetRow } from "@/lib/supabase";
 export const AUDIT_VALUE_COLUMNS = [
   "grn_price_per_kg",
   "grn_price_per_unit",
+  "total_grn_per_unit",
   "grn_diff",
   "blinkit_sp",
   "adjusted_grn",
@@ -59,6 +60,7 @@ export const EDIT_AFFECTS: Record<
   grn_price_per_kg: [
     "grn_price_per_kg",
     "grn_price_per_unit",
+    "total_grn_per_unit",
     "grn_diff",
     "gm",
     "impact_pp_diff",
@@ -66,6 +68,7 @@ export const EDIT_AFFECTS: Record<
   ],
   adjusted_grn: [
     "adjusted_grn",
+    "total_grn_per_unit",
     "grn_diff",
     "gm",
     "impact_pp_diff",
@@ -95,6 +98,7 @@ export const EDIT_AFFECTS: Record<
 /** Derived columns — always taken from client cascade, never stale/null DB copies. */
 const CASCADE_ONLY_COLUMNS: ReadonlySet<AuditValueColumn> = new Set([
   "grn_price_per_unit",
+  "total_grn_per_unit",
   "grn_diff",
   "nlc",
   "nlc_negotiated",
@@ -133,6 +137,8 @@ export type PricingSheetAuditRow = {
   t3_grn_price_per_kg?: number | null;
   t3_grn_price_per_unit?: number | null;
   grn_diff?: number | null;
+  total_grn?: number | null;
+  total_grn_per_unit?: number | null;
   blinkit_sp?: number | null;
   adjusted_grn?: number | null;
   quoted_pp?: number | null;
@@ -254,6 +260,7 @@ export function computeClientCascadeFields(args: {
   return {
     grn_price_per_kg: grnPricePerKg,
     grn_price_per_unit: grnPerUnit,
+    total_grn_per_unit: totalGrnPerUnit,
     grn_diff: grnDiff,
     blinkit_sp: blinkitSp,
     adjusted_grn: adjustedGrn,
@@ -568,6 +575,26 @@ export function formatSparseAuditCell(
   }
   if (column === "cf") return raw.toFixed(2);
   return `₹${Number(raw).toFixed(2)}`;
+}
+
+/** Total GRN ₹/unit — stored on new locks; older history computes from GRN/kg + Adjusted GRN. */
+export function formatAuditTotalGrnPerUnit(
+  entry: PricingSheetAuditRow,
+  grnPricePerKg: number | null,
+  adjustedGrn: number,
+  cf: number,
+): string {
+  if (entry.total_grn_per_unit != null) {
+    return `₹${Number(entry.total_grn_per_unit).toFixed(2)}`;
+  }
+  if (entry.grn_price_per_kg == null && entry.adjusted_grn == null) return "";
+  const totalGrnPerUnit = totalGrnPerUnitFromParts(
+    entry.grn_price_per_kg ?? grnPricePerKg,
+    entry.adjusted_grn ?? adjustedGrn,
+    entry.cf ?? cf,
+  );
+  if (totalGrnPerUnit == null) return "";
+  return `₹${totalGrnPerUnit.toFixed(2)}`;
 }
 
 /** GRN Markup is display-only; show when either quoted or grn/kg changed in the sparse row. */

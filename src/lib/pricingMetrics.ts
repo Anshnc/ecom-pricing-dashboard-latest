@@ -33,6 +33,8 @@ export type RowMetrics = {
   piPct: number | null;
   gm: number | null;
   totalDemandPct: number;
+  /** Total Demand % when Blinkit SP is present and <> 0, else 0. */
+  bkspTotalDemandPct: number;
   quotedNlc: number | null;
   impactPpDiff: number | null;
   impactGm: number | null;
@@ -45,6 +47,19 @@ export type RowMetrics = {
 /** Demand-weighted mix % for impact columns — always from live basket totals. */
 export function demandMixPct(demandUnits: number, totalDemand: number): number {
   return totalDemand > 0 ? (demandUnits / totalDemand) * 100 : 0;
+}
+
+/** Blinkit SP is usable for PI% / bksp mix when it is present and not zero. */
+export function hasUsableBlinkitSp(blinkitSp: number | null | undefined): boolean {
+  return blinkitSp != null && !Number.isNaN(blinkitSp) && blinkitSp !== 0;
+}
+
+/** bksp total demand% = Total Demand % when Blinkit SP is present and <> 0, else 0. */
+export function bkspTotalDemandPctFromParts(
+  mixPct: number,
+  blinkitSp: number | null | undefined,
+): number {
+  return hasUsableBlinkitSp(blinkitSp) ? mixPct : 0;
 }
 
 /** Display NLC = Quoted PP + PM + FML + PC. Negotiated PP is never part of NLC. */
@@ -227,27 +242,26 @@ export function piPctFromDisplayNlc(
 }
 
 /**
- * Price Upload PI% average:
- * ((Σ demand × BK SP) − (Σ demand × NLC)) / (Σ demand × BK SP) × 100
- * Rows missing Blinkit SP or NLC are excluded from all three sums.
+ * Price Upload Avg PI% =
+ * SUMPRODUCT(PI% where it exists, bksp total demand% where it exists)
+ * / SUM(all rows of bksp total demand%)
+ *
+ * Rows with missing/zero Blinkit SP have blank PI% and 0 mix, so they add 0.
  */
-export function basketPiPctAvg(
+export function avgPiPctFromBkspMix(
   rows: Array<{
-    demandUnits: number;
-    blinkitSp: number | null | undefined;
-    nlc: number | null;
+    piPct: number | null | undefined;
+    bkspTotalDemandPct: number;
   }>,
 ): number | null {
-  let bkValue = 0;
-  let nlcValue = 0;
+  let weightedSum = 0;
+  let weightSum = 0;
   for (const r of rows) {
-    const sp = r.blinkitSp;
-    if (sp == null || Number.isNaN(sp) || sp === 0 || r.nlc == null) continue;
-    bkValue += r.demandUnits * sp;
-    nlcValue += r.demandUnits * r.nlc;
+    weightSum += r.bkspTotalDemandPct;
+    if (r.piPct == null || Number.isNaN(r.piPct)) continue;
+    weightedSum += r.piPct * r.bkspTotalDemandPct;
   }
-  if (bkValue === 0) return null;
-  return ((bkValue - nlcValue) / bkValue) * 100;
+  return weightSum > 0 ? weightedSum / weightSum : null;
 }
 
 /** Simple mean of numeric values; skips null, undefined, and NaN (NA / blanks). */
@@ -289,6 +303,7 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
   const gm =
     nlc !== null && totalGrnPerUnit !== null ? nlc - totalGrnPerUnit : null;
   const mixPct = demandMixPct(row.demandUnits, totalDemand);
+  const bkspTotalDemandPct = bkspTotalDemandPctFromParts(mixPct, row.blinkitSp);
   const quotedForImpact = row.quotedPpIsSet === false ? null : row.quotedPp;
 
   // Impact PP = (Quoted PP − Total GRN ₹/unit) × Total Demand % — formula only.
@@ -314,6 +329,7 @@ export function computeRowMetrics(row: RowMetricsInput, totalDemand: number): Ro
     piPct,
     gm,
     totalDemandPct: mixPct,
+    bkspTotalDemandPct,
     quotedNlc: nlc,
     impactPpDiff,
     impactGm,

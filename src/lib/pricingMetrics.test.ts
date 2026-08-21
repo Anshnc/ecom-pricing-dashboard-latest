@@ -1,6 +1,7 @@
 import {
-  basketPiPctAvg,
+  avgPiPctFromBkspMix,
   bkValueMixDemandWeightedAvg,
+  bkspTotalDemandPctFromParts,
   computeRowMetrics,
   deflectionPctFromNlc,
   demandMixPct,
@@ -137,6 +138,16 @@ assertClose(noNeg.nlc, 34, "NLC uses Quoted PP when Negotiated was never set");
 
 const noSp = computeRowMetrics({ ...row, blinkitSp: null }, totalDemand);
 assertClose(noSp.piPct, null, "PI% blank when Blinkit SP is missing");
+assertClose(noSp.bkspTotalDemandPct, 0, "bksp total demand% is 0 when Blinkit SP is missing");
+
+const zeroSp = computeRowMetrics({ ...row, blinkitSp: 0 }, totalDemand);
+assertClose(zeroSp.piPct, null, "PI% blank when Blinkit SP is 0");
+assertClose(zeroSp.bkspTotalDemandPct, 0, "bksp total demand% is 0 when Blinkit SP is 0");
+assertClose(
+  computeRowMetrics(row, totalDemand).bkspTotalDemandPct,
+  mixPct,
+  "bksp total demand% equals Total Demand % when Blinkit SP is present",
+);
 
 // Simple mean of Blinkit SP / PI% / BK mix skips NA/blanks.
 assertClose(simpleMean([50, 150, null]), 100, "Blinkit SP simple mean skips blank");
@@ -188,31 +199,32 @@ assertClose(
   "Blinkit SP average is null when no paired NLC+SP rows",
 );
 
-// PI% average = ((Σ demand×BK SP) − (Σ demand×NLC)) / (Σ demand×BK SP) × 100
+// Avg PI% = SUMPRODUCT(PI%, bksp total demand%) / SUM(bksp total demand%)
 assertClose(
-  basketPiPctAvg([
-    { demandUnits: 10, blinkitSp: 50, nlc: 30 },
-    { demandUnits: 20, blinkitSp: 80, nlc: 40 },
-    { demandUnits: 100, blinkitSp: null, nlc: 10 },
+  avgPiPctFromBkspMix([
+    { piPct: 20, bkspTotalDemandPct: 50 },
+    { piPct: 40, bkspTotalDemandPct: 30 },
+    { piPct: null, bkspTotalDemandPct: 0 },
+    { piPct: null, bkspTotalDemandPct: 0 },
   ]),
-  ((10 * 50 + 20 * 80) - (10 * 30 + 20 * 40)) / (10 * 50 + 20 * 80) * 100,
-  "PI% avg uses demand×SP and demand×NLC; missing BK SP excluded",
+  (20 * 50 + 40 * 30) / 80,
+  "Avg PI% = SUMPRODUCT(PI%, bksp mix) / SUM(bksp mix); missing/zero SP contribute 0",
 );
 assertClose(
-  basketPiPctAvg([
-    { demandUnits: 10, blinkitSp: 50, nlc: 30 },
-    { demandUnits: 20, blinkitSp: 80, nlc: null },
+  avgPiPctFromBkspMix([
+    { piPct: 10, bkspTotalDemandPct: bkspTotalDemandPctFromParts(60, 50) },
+    { piPct: 30, bkspTotalDemandPct: bkspTotalDemandPctFromParts(40, 0) },
   ]),
-  ((10 * 50) - (10 * 30)) / (10 * 50) * 100,
-  "PI% avg excludes rows missing NLC",
+  10,
+  "Avg PI% ignores mix of SKUs with Blinkit SP = 0",
 );
 assertClose(
-  basketPiPctAvg([
-    { demandUnits: 10, blinkitSp: null, nlc: 30 },
-    { demandUnits: 20, blinkitSp: 0, nlc: 40 },
+  avgPiPctFromBkspMix([
+    { piPct: null, bkspTotalDemandPct: 0 },
+    { piPct: null, bkspTotalDemandPct: 0 },
   ]),
   null,
-  "PI% avg is null when no BK SP value to divide by",
+  "Avg PI% is null when SUM(bksp total demand%) is 0",
 );
 
 // Negotiated PP is never part of NLC, even when it is set and differs from Quoted.

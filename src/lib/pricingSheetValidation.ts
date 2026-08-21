@@ -1,4 +1,5 @@
 import {
+  bkspTotalDemandPctFromParts,
   computeRowMetrics,
   demandMixPct,
   displayNlcIsPresent,
@@ -159,6 +160,22 @@ export function validatePricingSheetRows(
       pushBug(bugs, "Total Demand %", "A", sku, "Live mix % mismatch", expMix, calc.totalDemandPct, db.demand_pct);
     }
 
+    const expBkspMix = bkspTotalDemandPctFromParts(expMix, sku.blinkitSp);
+    const bkspMixOk = close(calc.bkspTotalDemandPct, expBkspMix);
+    bump("bksp total demand%", bkspMixOk);
+    if (!bkspMixOk) {
+      pushBug(
+        bugs,
+        "bksp total demand%",
+        "A",
+        sku,
+        "bksp total demand% mismatch",
+        expBkspMix,
+        calc.bkspTotalDemandPct,
+        db.bksp_total_demand_pct,
+      );
+    }
+
     // B — Total GRN ₹/unit
     const expTotalGrn = totalGrnPerUnitFromParts(sku.grnPricePerKg, sku.adjustedGrn, sku.conversionFactor);
     const totalGrnOk = close(calc.totalGrnPerUnit, expTotalGrn);
@@ -271,6 +288,7 @@ export function validatePricingSheetRows(
       ["DB impact_gm", db.impact_gm, calc.impactGm, "I"],
       ["DB impact_pp_diff", db.impact_pp_diff, calc.impactPpDiff, "H"],
       ["DB pi_pct", db.pi_pct, calc.piPct, "E"],
+      ["DB bksp_total_demand_pct", db.bksp_total_demand_pct, calc.bkspTotalDemandPct, "A"],
       ["DB grn_diff", db.grn_diff, calc.grnDiff, "B"],
       ["DB bk_value_mix", db.bk_value_mix, calc.valueMix, "K"],
     ];

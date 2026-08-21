@@ -16,6 +16,7 @@ import { usePricingSheet } from "@/hooks/usePricingSheet";
 import { useSubcategories } from "@/hooks/useSubcategories";
 import { useGuardrails } from "@/hooks/useGuardrails";
 import { parseCSV, toNum, toInt } from "@/lib/csv";
+import { parseBulkPriceUpdates, type BulkUpdate } from "@/lib/bulkPriceUpload";
 import { fsnWeightKey, loadFsnWeightUnitMap } from "@/lib/fsnWeightUnit";
 import {
   ChevronUp,
@@ -50,10 +51,9 @@ import {
 import { formatLocalISO, loadPricingSheetDemand, todayISO, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
 import { useFrozenSort, type SortDir } from "@/hooks/useFrozenSort";
 import {
-  basketPiPctAvg,
+  avgPiPctFromBkspMix,
   bkValueMixDemandWeightedAvg,
   computeRowMetrics,
-  displayNlcIsPresent,
   meanBlinkitSpWhenBothPresent,
 } from "@/lib/pricingMetrics";
 import { upsertFsnCostComponentsFromCsv, fetchFsnCostComponentsByFsns, parseFsnCostCsvRows } from "@/lib/skuCostComponents";
@@ -65,6 +65,7 @@ import {
   fetchPricingSheetRow,
   fetchRowAuditHistory,
   formatAuditGrnMarkup,
+  formatAuditTotalGrnPerUnit,
   formatSparseAuditCell,
   recordLockAudit,
   type PricingSheetAuditRow,
@@ -381,12 +382,11 @@ function computePriceUploadAverages(enriched: Enriched[]) {
     // Simple mean of Blinkit SP; count is only rows where NLC and Blinkit SP are both present.
     blinkitSp: meanBlinkitSpWhenBothPresent(enriched.map((e) => e.row)),
     nlc: wNlc,
-    // ((Σ demand×BK SP) − (Σ demand×NLC)) / (Σ demand×BK SP) × 100
-    piPct: basketPiPctAvg(
+    // SUMPRODUCT(PI%, bksp total demand%) / SUM(bksp total demand%)
+    piPct: avgPiPctFromBkspMix(
       enriched.map((e) => ({
-        demandUnits: e.row.demandUnits,
-        blinkitSp: e.row.blinkitSp,
-        nlc: displayNlcIsPresent(e.row) ? e.calc.nlc : null,
+        piPct: e.calc.piPct,
+        bkspTotalDemandPct: e.calc.bkspTotalDemandPct,
       })),
     ),
     priceDeflectionPct: weightedByDemandPct(enriched, (e) => e.calc.deflectionPct),
@@ -897,20 +897,34 @@ export function PricingDashboard() {
     // Resolve matching rows + patches ahead of time.
     type Job = { row: SkuRow; update: BulkUpdate; patch: Partial<SkuRow>; dbPatch: Partial<PricingSheetRow> };
     const jobs: Job[] = [];
+    const skippedAmbiguous: string[] = [];
     for (const u of updates) {
-      const row = rows.find(
+      const matches = rows.filter(
         (r) =>
           r.fsnId === u.fsnId &&
           (u.weightUnit
             ? r.weightUnit === u.weightUnit || r.dbWeightUnit === u.weightUnit
             : true),
       );
-      if (!row) continue;
+      if (matches.length === 0) continue;
+      if (!u.weightUnit && matches.length > 1) {
+        skippedAmbiguous.push(u.fsnId);
+        continue;
+      }
+      const row = matches[0]!;
       const patch: Partial<SkuRow> = {};
       if (u.blinkitSp !== undefined) patch.blinkitSp = u.blinkitSp;
       if (u.adjustedGrn !== undefined) patch.adjustedGrn = u.adjustedGrn ?? 0;
-      if (u.quotedPp !== undefined && u.quotedPp !== null) { patch.quotedPp = u.quotedPp; patch.quotedTouched = true; }
-      if (u.negotiatedPp !== undefined && u.negotiatedPp !== null) { patch.negotiatedPp = u.negotiatedPp; patch.negotiatedTouched = true; }
+      if (u.quotedPp !== undefined && u.quotedPp !== null) {
+        patch.quotedPp = u.quotedPp;
+        patch.quotedPpIsSet = true;
+        patch.quotedTouched = true;
+      }
+      if (u.negotiatedPp !== undefined && u.negotiatedPp !== null) {
+        patch.negotiatedPp = u.negotiatedPp;
+        patch.negotiatedPpIsSet = u.negotiatedPp !== 0;
+        patch.negotiatedTouched = true;
+      }
       if (u.grnPricePerKg !== undefined) patch.grnPricePerKg = u.grnPricePerKg;
       if (Object.keys(patch).length === 0) continue;
       const dbPatch: Partial<PricingSheetRow> = {};
@@ -923,7 +937,11 @@ export function PricingDashboard() {
     const total = jobs.length;
     if (total === 0) {
       const { toast } = await import("sonner");
-      toast.error("No matching rows to update");
+      toast.error(
+        skippedAmbiguous.length > 0
+          ? `No unique FSN matches. Add Weight Unit for: ${skippedAmbiguous.slice(0, 3).join(", ")}`
+          : "No matching rows to update",
+      );
       return;
     }
 
@@ -971,8 +989,20 @@ export function PricingDashboard() {
     lastBulkFailures.current = failed;
     setBulkFailuresVersion((v) => v + 1);
 
+    // Reload so NLC / GM / PI% come from the DB trigger (Quoted PP + cost components).
+    try {
+      await dbRefetch();
+    } catch (e) {
+      console.warn("Sheet reload after bulk upload failed:", e);
+    }
+
+    const ambiguousNote =
+      skippedAmbiguous.length > 0
+        ? ` Skipped ${skippedAmbiguous.length} FSN(s) with multiple packs (need Weight Unit).`
+        : "";
+
     if (failed.length === 0) {
-      toast.success(`Saved ${total} rows`, { id: toastId });
+      toast.success(`Saved ${total} rows.${ambiguousNote} NLC and GM were recalculated.`, { id: toastId });
     } else {
       const preview = failedDetail.slice(0, 3).map((f) => f.fsnId).join(", ");
       const suffix = failedDetail.length > 3 ? "…" : "";
@@ -1674,16 +1704,6 @@ function Modal({ children, onClose, title }: { children: React.ReactNode; onClos
   );
 }
 
-// ---------- Bulk Upload Modal ----------
-type BulkUpdate = {
-  fsnId: string;
-  weightUnit: string | null;
-  blinkitSp?: number | null;
-  adjustedGrn?: number | null;
-  quotedPp?: number | null;
-  negotiatedPp?: number | null;
-  grnPricePerKg?: number | null;
-};
 function BulkUploadModal({
   onClose,
   onApply,
@@ -1702,42 +1722,15 @@ function BulkUploadModal({
     setBusy(true);
     try {
       const text = await file.text();
-      const parsed = parseCSV(text);
-      const updates: BulkUpdate[] = parsed
-        .map((r) => {
-          const getK = (...keys: string[]) => {
-            for (const k of keys) {
-              const found = Object.keys(r).find((h) => h.toLowerCase() === k.toLowerCase());
-              if (found && r[found] !== "") return r[found];
-            }
-            return undefined;
-          };
-          const u: BulkUpdate = {
-            fsnId: String(getK("fsn_id", "FSN ID", "FSNId") ?? ""),
-            weightUnit: (getK("weight_unit", "Weight Unit", "WeightUnit") ?? null) as string | null,
-          };
-          const bk = getK("blinkit_sp", "Blinkit SP", "BlinkitSP");
-          if (bk !== undefined) u.blinkitSp = toNum(bk);
-          const adj = getK("adjusted_grn", "Adjusted GRN", "AdjustedGrn");
-          if (adj !== undefined) u.adjustedGrn = toNum(adj);
-          const qp = getK("quoted_pp", "Quoted PP", "QuotedPp");
-          if (qp !== undefined) u.quotedPp = toNum(qp);
-          const np = getK("negotiated_pp", "Negotiated PP", "NegotiatedPp");
-          if (np !== undefined) u.negotiatedPp = toNum(np);
-          const gk = getK("grn_price_per_kg", "GRN ₹/kg", "GRN Price Per Kg");
-          if (gk !== undefined) u.grnPricePerKg = toNum(gk);
-          return u;
-        })
-        .filter((u) =>
-          u.fsnId &&
-          (u.blinkitSp !== undefined || u.adjustedGrn !== undefined ||
-           u.quotedPp !== undefined || u.negotiatedPp !== undefined ||
-           u.grnPricePerKg !== undefined),
-        );
+      const { updates, hasDerivedColumns } = parseBulkPriceUpdates(text);
       if (updates.length === 0) {
         const { toast } = await import("sonner");
-        toast.error("No valid rows (need fsn_id + at least one editable column)");
+        toast.error("No valid rows (need FSN + at least one editable column with a number)");
         return;
+      }
+      if (hasDerivedColumns) {
+        const { toast } = await import("sonner");
+        toast.message("NLC, GM, and PI% in the file are ignored. They are recalculated from Quoted PP + costs.");
       }
       await onApply(updates);
     } catch (e) {
@@ -1750,10 +1743,11 @@ function BulkUploadModal({
   return (
     <Modal onClose={onClose} title="Bulk upload prices">
       <p className="text-[12px] text-muted-foreground">
-        Upload the exported sheet. Recognised editable columns: <code>blinkit_sp</code>,
-        <code> adjusted_grn</code>, <code>quoted_pp</code>, <code>negotiated_pp</code>,
-        <code> grn_price_per_kg</code>. Rows are matched on <code>fsn_id</code> +
-        <code> weight_unit</code>, scoped to current city + delivery date. Any subset of columns is fine — others are left unchanged.
+        Upload the exported sheet. Only these columns are written:
+        <code> quoted_pp</code>, <code>negotiated_pp</code>, <code>blinkit_sp</code>,
+        <code> adjusted_grn</code>, <code>grn_price_per_kg</code>.
+        Rows match on FSN + Weight Unit (current city + date).
+        <strong> NLC, GM, PI%, and deflection in the file are ignored</strong> — after Quoted PP is saved they are recalculated as Quoted PP + packing + FML + processing. Putting a number in the NLC column does nothing.
       </p>
       <input
         type="file"
@@ -2126,12 +2120,12 @@ function ScrollTable({
   auditLoadingKey: string | null;
 }) {
   return (
-    <table className="min-w-[1960px] border-collapse text-[12px] [&_th]:box-border [&_td]:box-border [&_th]:overflow-hidden [&_td]:overflow-hidden [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
+    <table className="min-w-[2080px] border-collapse text-[12px] [&_th]:box-border [&_td]:box-border [&_th]:overflow-hidden [&_td]:overflow-hidden [&_th]:border-r [&_td]:border-r [&_th]:border-border/60 [&_td]:border-border/60 [&_tr>*:last-child]:border-r-0">
       <colgroup>
         {/* Basic Info (scrollable): NC SKU Name, Special Tags, Subcategory, Conv. Factor, Demand Units */}
         <col style={{ width: 200 }} /><col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} />
-        {/* Demand Info (6): NLC Value Mix, GRN/kg, Prev GRN/unit, GRN/unit, GRN Diff, Adjusted GRN */}
-        <col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 130 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 120 }} />
+        {/* Demand Info (7): NLC Value Mix, GRN/kg, Prev GRN/unit, GRN/unit, GRN Diff, Adjusted GRN, Total GRN ₹/unit */}
+        <col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 130 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 120 }} /><col style={{ width: 120 }} />
         {/* Benchmark Info (13) */}
         <col style={{ width: 90 }} /><col style={{ width: 80 }} /><col style={{ width: 120 }} /><col style={{ width: 110 }} /><col style={{ width: 120 }} /><col style={{ width: 100 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 80 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} /><col style={{ width: 100 }} /><col style={{ width: 110 }} />
       </colgroup>
@@ -2140,7 +2134,7 @@ function ScrollTable({
           <th colSpan={1} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information</th>
           <th colSpan={3} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Basic Information (cont.)</th>
           <th colSpan={1} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
-          <th colSpan={6} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
+          <th colSpan={7} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Demand Information</th>
           <th colSpan={13} className={`${STICKY_GROUP} ${GROUP_TH} truncate border-b border-l bg-muted px-2 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground`}>Benchmark Information</th>
         </tr>
 
@@ -2167,7 +2161,7 @@ function ScrollTable({
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Negotiated PP" active={sortKey==="negotiatedPp"} dir={sortDir} onClick={() => toggleSort("negotiatedPp")} /></th>
           <th title="Suggested PP" className={`${STICKY_COL} ${HEAD_TH} truncate bg-card px-2 text-right text-[11px] font-semibold uppercase tracking-wide text-muted-foreground`}>Suggested PP</th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="NLC" active={sortKey==="nlc"} dir={sortDir} onClick={() => toggleSort("nlc")} /></th>
-          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="PI %" active={sortKey==="piPct"} dir={sortDir} onClick={() => toggleSort("piPct")} /></th>
+          <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="Avg PI% = SUMPRODUCT(PI%, bksp total demand%) / SUM(bksp total demand%)"><SortHeader align="right" label="PI %" active={sortKey==="piPct"} dir={sortDir} onClick={() => toggleSort("piPct")} /></Tip></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="GM" active={sortKey==="gm"} dir={sortDir} onClick={() => toggleSort("gm")} /></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><SortHeader align="right" label="Deflection %" active={sortKey==="priceDeflectionPct"} dir={sortDir} onClick={() => toggleSort("priceDeflectionPct")} /></th>
           <th className={`${STICKY_COL} ${HEAD_TH} bg-card px-2`}><Tip text="(Quoted PP − Total GRN ₹/unit) × Total Demand %"><SortHeader align="right" label="Impact PP Diff" active={sortKey==="impactPpDiff"} dir={sortDir} onClick={() => toggleSort("impactPpDiff")} /></Tip></th>
@@ -2194,7 +2188,7 @@ function ScrollTable({
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.negotiatedPp)}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.suggestedPp)}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.nlc)}</td>
-          <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{num(averages.piPct)}%</td>
+          <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{num(averages.piPct, 2)}%</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.gm)}</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{num(averages.priceDeflectionPct)}%</td>
           <td className={`${STICKY_AVG} ${AVG_TD} bg-accent px-2 text-right tabular-nums`}>{fmt(averages.impactPpDiff)}</td>
@@ -2344,7 +2338,7 @@ function ScrollTable({
                     locked={row.quotedLocked}
                     onUnlock={() => updateRowLocal(row.fsnId, { quotedLocked: false })}
                     onApply={(v) => {
-                      const next: Partial<SkuRow> = { quotedPp: v, quotedTouched: true };
+                      const next: Partial<SkuRow> = { quotedPp: v, quotedPpIsSet: true, quotedTouched: true };
                       setPartialIfNegotiatedFollows(next, row, v);
                       updateRowLocal(row.fsnId, next);
                     }}
@@ -2354,7 +2348,7 @@ function ScrollTable({
                     locked={row.quotedLocked}
                     disabled={submitted}
                     onChange={(v) => {
-                      const next: Partial<SkuRow> = { quotedPp: v, quotedTouched: true };
+                      const next: Partial<SkuRow> = { quotedPp: v, quotedPpIsSet: true, quotedTouched: true };
                       setPartialIfNegotiatedFollows(next, row, v);
                       updateRowLocal(row.fsnId, next);
                     }}
@@ -2452,12 +2446,12 @@ function ScrollTable({
             </tr>
             {expanded && loading && (
               <tr className={`${ROW_H} border-b bg-muted/30`}>
-                <td colSpan={24} className="px-2 text-[11px] text-muted-foreground">Loading history…</td>
+                <td colSpan={25} className="px-2 text-[11px] text-muted-foreground">Loading history…</td>
               </tr>
             )}
             {expanded && !loading && history.length === 0 && (
               <tr className={`${ROW_H} border-b bg-muted/30`}>
-                <td colSpan={24} className="px-2 text-[11px] text-muted-foreground">No previous changes</td>
+                <td colSpan={25} className="px-2 text-[11px] text-muted-foreground">No previous changes</td>
               </tr>
             )}
             {expanded && !loading && history.map((entry) => (
@@ -2477,6 +2471,9 @@ function ScrollTable({
                 <td className="px-2 text-right tabular-nums font-medium text-foreground">{formatSparseAuditCell(entry, "grn_price_per_unit")}</td>
                 <td className="px-2 text-right tabular-nums font-medium text-foreground">{formatSparseAuditCell(entry, "grn_diff")}</td>
                 <td className="px-2 text-right tabular-nums font-medium text-foreground">{formatSparseAuditCell(entry, "adjusted_grn")}</td>
+                <td className="px-2 text-right tabular-nums font-medium text-foreground">
+                  {formatAuditTotalGrnPerUnit(entry, row.grnPricePerKg, row.adjustedGrn ?? 0, row.conversionFactor)}
+                </td>
                 <td className="border-l px-2 text-right tabular-nums font-medium text-foreground">{formatSparseAuditCell(entry, "blinkit_sp")}</td>
                 <td className="px-2" />
                 <td className="px-2 text-right tabular-nums font-medium text-foreground">{formatSparseAuditCell(entry, "quoted_pp")}</td>

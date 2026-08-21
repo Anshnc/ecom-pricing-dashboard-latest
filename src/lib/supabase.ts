@@ -54,6 +54,8 @@ export type PriceSheetDetailRow = {
   subcategory: string | null;
   demand_units: number | null;
   demand_pct: number | null;
+  /** Total Demand % when Blinkit SP is present and <> 0, else 0. DB only. */
+  bksp_total_demand_pct?: number | null;
   grn_price_per_kg: number | null;
   grn_price_per_unit: number | null;
   prev_grn_price_per_kg: number | null;
@@ -122,6 +124,8 @@ export type PricingSheetRow = {
   // demand
   demand_units: number | null;
   demand_pct: number | null;
+  /** Total Demand % when Blinkit SP is present and <> 0, else 0. DB only. */
+  bksp_total_demand_pct?: number | null;
 
   // GRN
   grn_price_per_kg: number | null;
