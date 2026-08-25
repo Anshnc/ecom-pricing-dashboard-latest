@@ -17,7 +17,6 @@ import { useSubcategories } from "@/hooks/useSubcategories";
 import { useGuardrails } from "@/hooks/useGuardrails";
 import { parseCSV, toNum, toInt } from "@/lib/csv";
 import { parseBulkPriceUpdates, type BulkUpdate } from "@/lib/bulkPriceUpload";
-import { parseBlinkitSpUpload, pairBlinkitSpBySequence } from "@/lib/blinkitSpUpload";
 import { fsnWeightKey, loadFsnWeightUnitMap } from "@/lib/fsnWeightUnit";
 import {
   ChevronUp,
@@ -150,6 +149,7 @@ type SkuRow = {
   grnWarning?: boolean;
   blinkitSp: number | null;
   blinkitLocked?: boolean;
+  blinkitTouched?: boolean;
   adjustedGrn?: number;
   adjustedGrnLocked?: boolean;
   wspTrend?: "up" | "down" | "flat";
@@ -570,16 +570,40 @@ export function PricingDashboard() {
           negotiatedLocked: p.negotiatedLocked,
           quotedTouched: p.quotedTouched,
           negotiatedTouched: p.negotiatedTouched,
+          blinkitTouched: p.blinkitTouched,
           lastLockedNegotiated: p.lastLockedNegotiated,
           suggestionAcknowledgedAt: p.suggestionAcknowledgedAt,
           suggestedPp: p.suggestedPp,
+          packagingCost: p.packagingCost || fresh.packagingCost,
+          fmlCost: p.fmlCost || fresh.fmlCost,
+          processingCost: p.processingCost || fresh.processingCost,
+          prevDayNlc: p.prevDayNlc ?? fresh.prevDayNlc,
         };
-        if (editing || hasPending) {
+        // Bulk upload leaves cells locked. Keep uploaded values until the DB
+        // row catches up so derived columns (NLC, GM, PI%) don't snap back.
+        const quotedPending =
+          !!p.quotedTouched &&
+          p.quotedPpIsSet === true &&
+          (fresh.quotedPp !== p.quotedPp || fresh.quotedPpIsSet !== true);
+        const negotiatedPending =
+          !!p.negotiatedTouched &&
+          (fresh.negotiatedPp !== p.negotiatedPp || fresh.negotiatedPpIsSet !== p.negotiatedPpIsSet);
+        const blinkitPending = !!p.blinkitTouched && p.blinkitSp !== fresh.blinkitSp;
+        merged.quotedTouched = quotedPending || (!p.quotedLocked && !!p.quotedTouched);
+        merged.negotiatedTouched = negotiatedPending || (!p.negotiatedLocked && !!p.negotiatedTouched);
+        merged.blinkitTouched = blinkitPending || (!p.blinkitLocked && !!p.blinkitTouched);
+        if (editing || hasPending || quotedPending || negotiatedPending || blinkitPending) {
           if (!p.grnLocked || hasPending) merged.grnPricePerKg = p.grnPricePerKg;
-          if (!p.blinkitLocked || hasPending) merged.blinkitSp = p.blinkitSp;
+          if (!p.blinkitLocked || hasPending || blinkitPending) merged.blinkitSp = p.blinkitSp;
           if (!p.adjustedGrnLocked || hasPending) merged.adjustedGrn = p.adjustedGrn;
-          if (!p.quotedLocked || hasPending) merged.quotedPp = p.quotedPp;
-          if (!p.negotiatedLocked || hasPending) merged.negotiatedPp = p.negotiatedPp;
+          if (!p.quotedLocked || hasPending || quotedPending) {
+            merged.quotedPp = p.quotedPp;
+            merged.quotedPpIsSet = p.quotedPpIsSet;
+          }
+          if (!p.negotiatedLocked || hasPending || negotiatedPending) {
+            merged.negotiatedPp = p.negotiatedPp;
+            merged.negotiatedPpIsSet = p.negotiatedPpIsSet;
+          }
         }
         return merged;
       });
@@ -593,7 +617,6 @@ export function PricingDashboard() {
     setSheetCreated(false);
   }, [city, deliveryDate]);
   const [bulkOpen, setBulkOpen] = useState(false);
-  const [bkspOpen, setBkspOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [status, setStatus] = useState<"draft" | "created" | "pending" | "approved" | "rejected" | "modification">("draft");
@@ -1001,10 +1024,14 @@ export function PricingDashboard() {
   const [bulkFailuresVersion, setBulkFailuresVersion] = useState(0);
 
   const runBulkApply = async (updates: BulkUpdate[]) => {
-    // Resolve matching rows + patches ahead of time.
     type Job = { row: SkuRow; update: BulkUpdate; patch: Partial<SkuRow>; dbPatch: Partial<PricingSheetRow> };
     const jobs: Job[] = [];
     const skippedAmbiguous: string[] = [];
+    const bulkSaveMap = {
+      blinkitSp: "blinkit_sp",
+      quotedPp: "quoted_pp",
+      negotiatedPp: "negotiated_pp",
+    } as const;
     for (const u of updates) {
       const matches = rows.filter(
         (r) =>
@@ -1020,22 +1047,23 @@ export function PricingDashboard() {
       }
       const row = matches[0]!;
       const patch: Partial<SkuRow> = {};
-      if (u.blinkitSp !== undefined) patch.blinkitSp = u.blinkitSp;
-      if (u.adjustedGrn !== undefined) patch.adjustedGrn = u.adjustedGrn ?? 0;
-      if (u.quotedPp !== undefined && u.quotedPp !== null) {
+      if (typeof u.blinkitSp === "number") {
+        patch.blinkitSp = u.blinkitSp;
+        patch.blinkitTouched = true;
+      }
+      if (typeof u.quotedPp === "number") {
         patch.quotedPp = u.quotedPp;
         patch.quotedPpIsSet = true;
         patch.quotedTouched = true;
       }
-      if (u.negotiatedPp !== undefined && u.negotiatedPp !== null) {
+      if (typeof u.negotiatedPp === "number") {
         patch.negotiatedPp = u.negotiatedPp;
         patch.negotiatedPpIsSet = u.negotiatedPp !== 0;
         patch.negotiatedTouched = true;
       }
-      if (u.grnPricePerKg !== undefined) patch.grnPricePerKg = u.grnPricePerKg;
       if (Object.keys(patch).length === 0) continue;
       const dbPatch: Partial<PricingSheetRow> = {};
-      for (const [k, col] of Object.entries(SAVE_MAP)) {
+      for (const [k, col] of Object.entries(bulkSaveMap)) {
         if (k in patch) (dbPatch as Record<string, unknown>)[col] = (patch as Record<string, unknown>)[k];
       }
       jobs.push({ row, update: u, patch, dbPatch });
@@ -1054,9 +1082,9 @@ export function PricingDashboard() {
 
     // Merge every patch into local state up front (single re-render).
     setRows((rs) => {
-      const byKey = new Map(jobs.map((j) => [`${j.row.fsnId}||${j.row.weightUnit}`, j.patch]));
+      const byKey = new Map(jobs.map((j) => [skuRowKey(j.row), j.patch]));
       return rs.map((r) => {
-        const p = byKey.get(`${r.fsnId}||${r.weightUnit}`);
+        const p = byKey.get(skuRowKey(r));
         return p ? { ...r, ...p } : r;
       });
     });
@@ -1109,7 +1137,10 @@ export function PricingDashboard() {
         : "";
 
     if (failed.length === 0) {
-      toast.success(`Saved ${total} rows.${ambiguousNote} NLC and GM were recalculated.`, { id: toastId });
+      toast.success(
+        `Saved ${total} rows.${ambiguousNote} Derived columns were recalculated.`,
+        { id: toastId },
+      );
     } else {
       const preview = failedDetail.slice(0, 3).map((f) => f.fsnId).join(", ");
       const suffix = failedDetail.length > 3 ? "…" : "";
@@ -1122,90 +1153,6 @@ export function PricingDashboard() {
           label: "Retry failed",
           onClick: () => { void runBulkApply(failed); },
         },
-      });
-    }
-  };
-
-  const runBlinkitSpUpload = async (text: string) => {
-    const fileRows = parseBlinkitSpUpload(text);
-    if (fileRows.length === 0) {
-      const { toast } = await import("sonner");
-      toast.error("No valid rows. Need columns FSN and Blinkit SP.");
-      return;
-    }
-
-    const sheet = sorted.map((e) => e.row);
-    const paired = pairBlinkitSpBySequence(
-      fileRows,
-      sheet.map((r) => r.fsnId),
-    );
-    const jobs = paired.pairs.map((p) => ({ row: sheet[p.sheetIndex]!, blinkitSp: p.blinkitSp }));
-    if (jobs.length === 0) {
-      const { toast } = await import("sonner");
-      toast.error(
-        paired.fsnMismatch > 0
-          ? `FSN order does not match the current sheet (${paired.fsnMismatch} mismatch). Download CSV and keep the same row order.`
-          : "No Blinkit SP values to apply",
-      );
-      return;
-    }
-
-    setRows((rs) => {
-      const byKey = new Map(jobs.map((j) => [`${j.row.fsnId}||${j.row.weightUnit}`, j.blinkitSp]));
-      return rs.map((r) => {
-        const sp = byKey.get(`${r.fsnId}||${r.weightUnit}`);
-        return sp === undefined ? r : { ...r, blinkitSp: sp };
-      });
-    });
-
-    const { toast } = await import("sonner");
-    const toastId = `bksp-${Date.now()}`;
-    const total = jobs.length;
-    toast.loading(`Saving Blinkit SP 0 / ${total}…`, { id: toastId });
-
-    let failed = 0;
-    let done = 0;
-    for (const j of jobs) {
-      try {
-        await dbUpdateRow(
-          {
-            id: j.row.rowId,
-            fsn_id: j.row.fsnId,
-            weight_unit: j.row.dbWeightUnit ?? j.row.weightUnit ?? null,
-          },
-          { blinkit_sp: j.blinkitSp },
-        );
-      } catch {
-        failed += 1;
-      }
-      done += 1;
-      if (done % 5 === 0 || done === total) {
-        toast.loading(`Saving Blinkit SP ${done} / ${total}…`, { id: toastId });
-      }
-    }
-
-    try {
-      await dbRefetch();
-    } catch (e) {
-      console.warn("Sheet reload after Blinkit SP upload failed:", e);
-    }
-
-    const extra = [
-      paired.fsnMismatch > 0 ? `${paired.fsnMismatch} FSN/order skipped` : "",
-      paired.skippedEmpty > 0 ? `${paired.skippedEmpty} blank SP skipped` : "",
-      paired.extraFile > 0 ? `${paired.extraFile} extra file rows ignored` : "",
-    ]
-      .filter(Boolean)
-      .join(". ");
-
-    if (failed === 0) {
-      toast.success(
-        `Updated Blinkit SP on ${total} rows.${extra ? ` ${extra}.` : ""} PI% and BK Value Mix were recalculated.`,
-        { id: toastId },
-      );
-    } else {
-      toast.error(`Saved ${total - failed} / ${total} Blinkit SP rows.${extra ? ` ${extra}.` : ""}`, {
-        id: toastId,
       });
     }
   };
@@ -1555,13 +1502,6 @@ export function PricingDashboard() {
               >
                 <Upload className="h-3.5 w-3.5" /> Bulk Upload
               </button>
-              <button
-                disabled={submitted}
-                onClick={() => setBkspOpen(true)}
-                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input bg-background px-3 text-[12px] font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Upload className="h-3.5 w-3.5" /> Upload BKSP
-              </button>
             </div>
             <div className="flex flex-col items-end gap-2">
               {status !== "draft" && (() => {
@@ -1883,16 +1823,6 @@ export function PricingDashboard() {
         />
       )}
 
-      {bkspOpen && (
-        <BlinkitSpUploadModal
-          onClose={() => setBkspOpen(false)}
-          onApply={async (text) => {
-            setBkspOpen(false);
-            await runBlinkitSpUpload(text);
-          }}
-        />
-      )}
-
       {/* Confirm submit */}
       {confirmOpen && (
         <Modal onClose={() => setConfirmOpen(false)} title="Submit for approval?">
@@ -1942,15 +1872,11 @@ function BulkUploadModal({
     setBusy(true);
     try {
       const text = await file.text();
-      const { updates, hasDerivedColumns } = parseBulkPriceUpdates(text);
+      const updates = parseBulkPriceUpdates(text);
       if (updates.length === 0) {
         const { toast } = await import("sonner");
-        toast.error("No valid rows (need FSN + at least one editable column with a number)");
+        toast.error("No valid rows. Use the downloaded CSV and fill Quoted PP, Negotiated PP, or Blinkit SP.");
         return;
-      }
-      if (hasDerivedColumns) {
-        const { toast } = await import("sonner");
-        toast.message("NLC, GM, and PI% in the file are ignored. They are recalculated from Quoted PP + costs.");
       }
       await onApply(updates);
     } catch (e) {
@@ -1963,11 +1889,9 @@ function BulkUploadModal({
   return (
     <Modal onClose={onClose} title="Bulk upload prices">
       <p className="text-[12px] text-muted-foreground">
-        Upload the exported sheet. Only these columns are written:
-        <code> quoted_pp</code>, <code>negotiated_pp</code>, <code>blinkit_sp</code>,
-        <code> adjusted_grn</code>, <code>grn_price_per_kg</code>.
-        Rows match on FSN + Weight Unit (current city + date).
-        <strong> NLC, GM, PI%, and deflection in the file are ignored</strong> — after Quoted PP is saved they are recalculated as Quoted PP + packing + FML + processing. Putting a number in the NLC column does nothing.
+        Upload the same file as <strong>Download CSV</strong>. Edit Quoted PP, Negotiated PP,
+        and Blinkit SP, then upload. Other columns in the file are ignored. After save, NLC, GM,
+        PI%, deflection, and impact are recalculated from those three values.
       </p>
       <input
         type="file"
@@ -1999,57 +1923,6 @@ function BulkUploadModal({
           ) : (
             "Apply"
           )}
-        </button>
-      </div>
-    </Modal>
-  );
-}
-
-function BlinkitSpUploadModal({
-  onClose,
-  onApply,
-}: {
-  onClose: () => void;
-  onApply: (text: string) => void | Promise<void>;
-}) {
-  const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
-  const submit = async () => {
-    if (!file) return;
-    setBusy(true);
-    try {
-      await onApply(await file.text());
-    } catch (e) {
-      const { toast } = await import("sonner");
-      toast.error(`Upload failed: ${(e as Error).message}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Modal onClose={onClose} title="Upload BKSP">
-      <p className="text-[12px] text-muted-foreground">
-        CSV with <code>FSN</code> and <code>Blinkit SP</code> in the same row order as{" "}
-        <strong>Download CSV</strong>. Duplicate FSNs (different packs) are updated in that
-        sequence. Existing Blinkit SP is overwritten. Blank cells are skipped. Quoted PP, NLC, and
-        GM are not changed — PI% and BK Value Mix recalculate after save.
-      </p>
-      <input
-        type="file"
-        accept=".csv,text/csv"
-        onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-        className="mt-3 block w-full text-[12px]"
-      />
-      <div className="mt-4 flex justify-end gap-2">
-        <button onClick={onClose} className="h-8 rounded-md border border-input px-3 text-[12px] hover:bg-muted">
-          Cancel
-        </button>
-        <button
-          onClick={submit}
-          disabled={!file || busy}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
-        >
-          {busy ? "Applying…" : "Apply"}
         </button>
       </div>
     </Modal>

@@ -119,6 +119,11 @@ export function usePricingSheet(params: { city?: string; deliveryDate?: string; 
                 ...merged,
                 weight_unit: r.weight_unit,
                 weight_unit_db: r.weight_unit_db ?? r.weight_unit,
+                // RETURNING omits client-only enrichment; keep costs if the write did not return them.
+                pm_cost: merged.pm_cost ?? r.pm_cost,
+                fml_dump: merged.fml_dump ?? r.fml_dump,
+                pc: merged.pc ?? r.pc,
+                prev_day_nlc: r.prev_day_nlc,
               }
             : r;
         }),
