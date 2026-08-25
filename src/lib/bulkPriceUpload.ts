@@ -7,6 +7,7 @@ export type BulkUpdate = {
   blinkitSp?: number | null;
   quotedPp?: number | null;
   negotiatedPp?: number | null;
+  grnPricePerKg?: number | null;
 };
 
 function csvField(row: Record<string, string>, ...keys: string[]): string | undefined {
@@ -17,7 +18,7 @@ function csvField(row: Record<string, string>, ...keys: string[]): string | unde
   return undefined;
 }
 
-/** Parse the Download CSV. Only Quoted PP, Negotiated PP, and Blinkit SP are applied. */
+/** Parse the Download CSV. Only Quoted PP, Negotiated PP, Blinkit SP, and GRN ₹/kg are applied. */
 export function parseBulkPriceUpdates(text: string): BulkUpdate[] {
   const parsed = parseCSV(text);
   const updates: BulkUpdate[] = [];
@@ -40,9 +41,14 @@ export function parseBulkPriceUpdates(text: string): BulkUpdate[] {
     if (qp !== undefined) u.quotedPp = toNum(qp);
     const np = csvField(r, "negotiated_pp", "Negotiated PP", "NegotiatedPp");
     if (np !== undefined) u.negotiatedPp = toNum(np);
+    const gk = csvField(r, "grn_price_per_kg", "GRN ₹/kg", "GRN Price Per Kg", "GRN /kg");
+    if (gk !== undefined) u.grnPricePerKg = toNum(gk);
 
     const hasEditable =
-      u.blinkitSp != null || u.quotedPp != null || u.negotiatedPp != null;
+      u.blinkitSp != null ||
+      u.quotedPp != null ||
+      u.negotiatedPp != null ||
+      u.grnPricePerKg != null;
     if (hasEditable) updates.push(u);
   }
 

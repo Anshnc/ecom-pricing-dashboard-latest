@@ -146,6 +146,7 @@ type SkuRow = {
   prevDayGrnPerKg?: number | null;
   prevDayGrnPerUnit?: number | null;
   grnLocked?: boolean;
+  grnTouched?: boolean;
   grnWarning?: boolean;
   blinkitSp: number | null;
   blinkitLocked?: boolean;
@@ -571,6 +572,7 @@ export function PricingDashboard() {
           quotedTouched: p.quotedTouched,
           negotiatedTouched: p.negotiatedTouched,
           blinkitTouched: p.blinkitTouched,
+          grnTouched: p.grnTouched,
           lastLockedNegotiated: p.lastLockedNegotiated,
           suggestionAcknowledgedAt: p.suggestionAcknowledgedAt,
           suggestedPp: p.suggestedPp,
@@ -589,11 +591,17 @@ export function PricingDashboard() {
           !!p.negotiatedTouched &&
           (fresh.negotiatedPp !== p.negotiatedPp || fresh.negotiatedPpIsSet !== p.negotiatedPpIsSet);
         const blinkitPending = !!p.blinkitTouched && p.blinkitSp !== fresh.blinkitSp;
+        const grnPending = !!p.grnTouched && p.grnPricePerKg !== fresh.grnPricePerKg;
         merged.quotedTouched = quotedPending || (!p.quotedLocked && !!p.quotedTouched);
         merged.negotiatedTouched = negotiatedPending || (!p.negotiatedLocked && !!p.negotiatedTouched);
         merged.blinkitTouched = blinkitPending || (!p.blinkitLocked && !!p.blinkitTouched);
-        if (editing || hasPending || quotedPending || negotiatedPending || blinkitPending) {
-          if (!p.grnLocked || hasPending) merged.grnPricePerKg = p.grnPricePerKg;
+        merged.grnTouched = grnPending || (!(p.grnLocked ?? true) && !!p.grnTouched);
+        if (editing || hasPending || quotedPending || negotiatedPending || blinkitPending || grnPending) {
+          if (!p.grnLocked || hasPending || grnPending) {
+            merged.grnPricePerKg = p.grnPricePerKg;
+            merged.grnPricePerUnit = p.grnPricePerUnit;
+            merged.grnWarning = p.grnPricePerKg === null;
+          }
           if (!p.blinkitLocked || hasPending || blinkitPending) merged.blinkitSp = p.blinkitSp;
           if (!p.adjustedGrnLocked || hasPending) merged.adjustedGrn = p.adjustedGrn;
           if (!p.quotedLocked || hasPending || quotedPending) {
@@ -1031,6 +1039,8 @@ export function PricingDashboard() {
       blinkitSp: "blinkit_sp",
       quotedPp: "quoted_pp",
       negotiatedPp: "negotiated_pp",
+      grnPricePerKg: "grn_price_per_kg",
+      grnPricePerUnit: "grn_price_per_unit",
     } as const;
     for (const u of updates) {
       const matches = rows.filter(
@@ -1060,6 +1070,12 @@ export function PricingDashboard() {
         patch.negotiatedPp = u.negotiatedPp;
         patch.negotiatedPpIsSet = u.negotiatedPp !== 0;
         patch.negotiatedTouched = true;
+      }
+      if (typeof u.grnPricePerKg === "number") {
+        patch.grnPricePerKg = u.grnPricePerKg;
+        patch.grnPricePerUnit = u.grnPricePerKg * row.conversionFactor;
+        patch.grnTouched = true;
+        patch.grnWarning = false;
       }
       if (Object.keys(patch).length === 0) continue;
       const dbPatch: Partial<PricingSheetRow> = {};
@@ -1875,7 +1891,7 @@ function BulkUploadModal({
       const updates = parseBulkPriceUpdates(text);
       if (updates.length === 0) {
         const { toast } = await import("sonner");
-        toast.error("No valid rows. Use the downloaded CSV and fill Quoted PP, Negotiated PP, or Blinkit SP.");
+        toast.error("No valid rows. Use the downloaded CSV and fill Quoted PP, Negotiated PP, Blinkit SP, or GRN ₹/kg.");
         return;
       }
       await onApply(updates);
@@ -1890,8 +1906,9 @@ function BulkUploadModal({
     <Modal onClose={onClose} title="Bulk upload prices">
       <p className="text-[12px] text-muted-foreground">
         Upload the same file as <strong>Download CSV</strong>. Edit Quoted PP, Negotiated PP,
-        and Blinkit SP, then upload. Other columns in the file are ignored. After save, NLC, GM,
-        PI%, deflection, and impact are recalculated from those three values.
+        Blinkit SP, and GRN ₹/kg, then upload. Other columns in the file are ignored. After save,
+        NLC, GM, PI%, GRN ₹/unit, Total GRN, GRN Diff, GRN markup, deflection, and impact are
+        recalculated from those values.
       </p>
       <input
         type="file"

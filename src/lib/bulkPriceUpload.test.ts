@@ -15,12 +15,13 @@ assert(parsed[0]!.fsnId === "VEGGH9ZSYN3U269R", "FSN ID header");
 assert(parsed[0]!.quotedPp === 40, "Quoted PP from download CSV");
 assert(parsed[0]!.negotiatedPp === 38, "Negotiated PP from download CSV");
 assert(parsed[0]!.blinkitSp === 50, "Blinkit SP from download CSV");
+assert(parsed[0]!.grnPricePerKg === 20, "GRN ₹/kg from download CSV");
 
 const after = computeRowMetrics(
   {
     demandUnits: 100,
     conversionFactor: 1,
-    grnPricePerKg: 20,
+    grnPricePerKg: 30,
     quotedPp: parsed[0]!.quotedPp ?? 0,
     quotedPpIsSet: parsed[0]!.quotedPp != null,
     negotiatedPp: parsed[0]!.negotiatedPp ?? 0,
@@ -34,7 +35,9 @@ const after = computeRowMetrics(
 );
 assert(after.nlc !== 45.37, "CSV NLC is not used");
 assert(Math.abs((after.nlc ?? 0) - (40 + 1.7 + 0.95 + 3.72)) < 0.01, "NLC = new Quoted PP + costs");
-assert(Math.abs((after.gm ?? 0) - ((40 + 1.7 + 0.95 + 3.72) - 20)) < 0.01, "GM follows new NLC");
+assert(Math.abs((after.totalGrnPerUnit ?? 0) - 30) < 0.01, "Total GRN/unit follows new GRN ₹/kg");
+assert(Math.abs((after.gm ?? 0) - ((40 + 1.7 + 0.95 + 3.72) - 30)) < 0.01, "GM follows new NLC and GRN");
+assert(Math.abs((after.grnMarkup ?? 0) - (40 - 30)) < 0.01, "GRN markup follows new GRN ₹/kg");
 
 const junk = parseBulkPriceUpdates("FSN ID,Quoted PP\nABC123,not-a-number\n");
 assert(junk.length === 0, "non-numeric Quoted PP is skipped");
