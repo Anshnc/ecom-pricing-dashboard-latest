@@ -16,7 +16,7 @@ import { usePricingSheet } from "@/hooks/usePricingSheet";
 import { useSubcategories } from "@/hooks/useSubcategories";
 import { useGuardrails } from "@/hooks/useGuardrails";
 import { parseCSV, toNum, toInt } from "@/lib/csv";
-import { parseBulkPriceUpdates, type BulkUpdate } from "@/lib/bulkPriceUpload";
+import { parseBulkPriceUpload, type BulkUpdate } from "@/lib/bulkPriceUpload";
 import { fsnWeightKey, loadFsnWeightUnitMap } from "@/lib/fsnWeightUnit";
 import {
   ChevronUp,
@@ -72,6 +72,7 @@ import {
   recordLockAudit,
   type PricingSheetAuditRow,
 } from "@/lib/pricingAudit";
+import { initAnalytics, setAnalyticsContext, track } from "@/lib/analytics";
 const TABLE_ZOOM_MIN = 50;
 const TABLE_ZOOM_MAX = 100;
 
@@ -509,6 +510,16 @@ export function PricingDashboard() {
     SEED.map((r, i) => ({ ...r, skuId: `SKU${r.fsnId.slice(3)}`, quotedLocked: true, negotiatedLocked: true, adjustedGrn: 0, adjustedGrnLocked: true, wspTrend: (["up","down","flat","up","flat","down","up","flat","down","up"] as const)[i], prevDayGrnPerUnit: ([140, 44, null, null, 21, 415, 17, 27, null, 33] as (number | null)[])[i] }))
   );
 
+  useEffect(() => {
+    void initAnalytics().then(() => {
+      track("Dashboard Viewed");
+    });
+  }, []);
+
+  useEffect(() => {
+    setAnalyticsContext({ city, delivery_date: deliveryDate });
+  }, [city, deliveryDate]);
+
   // Live-load pricing_sheet rows when the user opens the sheet (Fetch/Create).
   const { rows: dbRows, loading: sheetFetchLoading, priceSheetId, updateRow: dbUpdateRow, submitSheet: dbSubmit, refetch: dbRefetch } =
     usePricingSheet({ city, deliveryDate, autoFetch: false });
@@ -747,36 +758,39 @@ export function PricingDashboard() {
   const applyViolationFilters = useCallback(() => {
     const fs = new Set(pendingViolationFilters);
     setAppliedViolationFilters(fs);
+    const matched = enriched.filter(({ row, calc }) => matchesViolationFilters(row, calc, fs));
     if (fs.size === 0) {
       setLockedViolationFsnIds(null);
     } else {
-      const ids = new Set(
-        enriched
-          .filter(({ row, calc }) => matchesViolationFilters(row, calc, fs))
-          .map(({ row }) => row.fsnId),
-      );
-      setLockedViolationFsnIds(ids);
+      setLockedViolationFsnIds(new Set(matched.map(({ row }) => row.fsnId)));
     }
     setFilterOpen(false);
+    track("Violation Filter Applied", {
+      filters: [...fs],
+      match_count: matched.length,
+    });
   }, [pendingViolationFilters, enriched, matchesViolationFilters]);
 
   const applySubcategoryFilters = useCallback(() => {
     const subs = new Set(pendingSubcategoryFilters);
     setAppliedSubcategoryFilters(subs);
+    const matched =
+      subs.size === 0
+        ? enriched
+        : enriched.filter(({ row }) => {
+            const sub = resolveSubcategory(row.fsnId, row.ncSkuId, row.subcategory);
+            return !!sub && subs.has(sub);
+          });
     if (subs.size === 0) {
       setLockedSubcategoryFsnIds(null);
     } else {
-      const ids = new Set(
-        enriched
-          .filter(({ row }) => {
-            const sub = resolveSubcategory(row.fsnId, row.ncSkuId, row.subcategory);
-            return !!sub && subs.has(sub);
-          })
-          .map(({ row }) => row.fsnId),
-      );
-      setLockedSubcategoryFsnIds(ids);
+      setLockedSubcategoryFsnIds(new Set(matched.map(({ row }) => row.fsnId)));
     }
     setSubcatFilterOpen(false);
+    track("Subcategory Filter Applied", {
+      subcategory_count: subs.size,
+      match_count: matched.length,
+    });
   }, [pendingSubcategoryFilters, enriched, resolveSubcategory]);
 
   const filtered = useMemo(() => {
@@ -1031,10 +1045,15 @@ export function PricingDashboard() {
   const lastBulkFailures = useRef<BulkUpdate[]>([]);
   const [bulkFailuresVersion, setBulkFailuresVersion] = useState(0);
 
-  const runBulkApply = async (updates: BulkUpdate[]) => {
+  const runBulkApply = async (updates: BulkUpdate[], opts?: { isRetry?: boolean }) => {
+    track("Bulk Upload Started", {
+      row_count: updates.length,
+      is_retry: !!opts?.isRetry,
+    });
     type Job = { row: SkuRow; update: BulkUpdate; patch: Partial<SkuRow>; dbPatch: Partial<PricingSheetRow> };
     const jobs: Job[] = [];
     const skippedAmbiguous: string[] = [];
+    const skippedUnmatched: string[] = [];
     const bulkSaveMap = {
       blinkitSp: "blinkit_sp",
       quotedPp: "quoted_pp",
@@ -1050,7 +1069,10 @@ export function PricingDashboard() {
             ? r.weightUnit === u.weightUnit || r.dbWeightUnit === u.weightUnit
             : true),
       );
-      if (matches.length === 0) continue;
+      if (matches.length === 0) {
+        skippedUnmatched.push(u.fsnId);
+        continue;
+      }
       if (!u.weightUnit && matches.length > 1) {
         skippedAmbiguous.push(u.fsnId);
         continue;
@@ -1086,13 +1108,23 @@ export function PricingDashboard() {
     }
 
     const total = jobs.length;
+    const grnJobs = jobs.filter((j) => typeof j.patch.grnPricePerKg === "number").length;
     if (total === 0) {
       const { toast } = await import("sonner");
       toast.error(
         skippedAmbiguous.length > 0
           ? `No unique FSN matches. Add Weight Unit for: ${skippedAmbiguous.slice(0, 3).join(", ")}`
-          : "No matching rows to update",
+          : skippedUnmatched.length > 0
+            ? `No matching rows. ${skippedUnmatched.length} FSN(s) in the file are not on this sheet.`
+            : "No matching rows to update",
       );
+      track("Bulk Upload Completed", {
+        saved: 0,
+        failed: 0,
+        skipped_unmatched: skippedUnmatched.length,
+        skipped_ambiguous: skippedAmbiguous.length,
+        success: false,
+      });
       return;
     }
 
@@ -1151,10 +1183,18 @@ export function PricingDashboard() {
       skippedAmbiguous.length > 0
         ? ` Skipped ${skippedAmbiguous.length} FSN(s) with multiple packs (need Weight Unit).`
         : "";
+    const unmatchedNote =
+      skippedUnmatched.length > 0
+        ? ` ${skippedUnmatched.length} FSN(s) in the file were not on this sheet.`
+        : "";
+    const grnNote =
+      grnJobs === 0
+        ? " GRN ₹/kg was not applied — check the column header is GRN ₹/kg or GRN/kg."
+        : ` GRN ₹/kg saved on ${grnJobs} rows.`;
 
     if (failed.length === 0) {
       toast.success(
-        `Saved ${total} rows.${ambiguousNote} Derived columns were recalculated.`,
+        `Saved ${total} rows.${grnNote}${ambiguousNote}${unmatchedNote} Derived columns were recalculated.`,
         { id: toastId },
       );
     } else {
@@ -1167,10 +1207,17 @@ export function PricingDashboard() {
         description: `Failed: ${preview}${suffix} (see console for full list)`,
         action: {
           label: "Retry failed",
-          onClick: () => { void runBulkApply(failed); },
+          onClick: () => { void runBulkApply(failed, { isRetry: true }); },
         },
       });
     }
+    track("Bulk Upload Completed", {
+      saved: total - failed.length,
+      failed: failed.length,
+      skipped_unmatched: skippedUnmatched.length,
+      skipped_ambiguous: skippedAmbiguous.length,
+      success: failed.length === 0,
+    });
   };
 
   const anyUnlockedEdit = rows.some(hasUnlockedCell);
@@ -1191,6 +1238,10 @@ export function PricingDashboard() {
         await checkSheetExists();
         setSheetCreated(true);
         toast.success("Pricing sheet loaded (cached)", { id: "demand-fetch" });
+        track("Sheet Loaded", {
+          action: showCreate ? "create" : "fetch",
+          source: "cache",
+        });
         return;
       }
 
@@ -1199,6 +1250,11 @@ export function PricingDashboard() {
         await dbRefetch();
         await checkSheetExists();
         setSheetCreated(true);
+        track("Sheet Loaded", {
+          action: showCreate ? "create" : "fetch",
+          source: result.source,
+          row_count: 0,
+        });
         return;
       }
 
@@ -1207,8 +1263,14 @@ export function PricingDashboard() {
       setSheetCreated(true);
       if (status === "draft") setStatus("created");
       toast.success(`Pricing sheet ready — ${result.rowCount} rows from demand`, { id: "demand-fetch" });
+      track("Sheet Loaded", {
+        action: showCreate ? "create" : "fetch",
+        source: result.source,
+        row_count: result.rowCount,
+      });
     } catch (e) {
       toast.error(`Failed to build sheet from demand: ${(e as Error).message}`, { id: "demand-fetch" });
+      track("Sheet Load Failed", { error: (e as Error).message });
     } finally {
       setSheetBusy(false);
     }
@@ -1231,6 +1293,7 @@ export function PricingDashboard() {
     a.click();
     URL.revokeObjectURL(url);
     import("sonner").then(({ toast }) => toast.success("FK Sheet download started"));
+    track("FK Sheet Downloaded", { sku_count: rows.length });
   };
 
   const onConfirmSubmit = async () => {
@@ -1248,13 +1311,16 @@ export function PricingDashboard() {
     setSubmitted(true);
     setStatus("pending");
     setConfirmOpen(false);
+    const skuCount = rows.length;
     try {
       await dbSubmit();
       const { toast } = await import("sonner");
       toast.success("Submitted for approval");
+      track("Price Confirmed", { sku_count: skuCount, success: true });
     } catch (e) {
       const { toast } = await import("sonner");
       toast.error(`Submit failed: ${(e as Error).message}`);
+      track("Price Confirmed", { sku_count: skuCount, success: false });
     }
     void dbUpdateRow; void dbRefetch;
   };
@@ -1365,7 +1431,11 @@ export function PricingDashboard() {
             {TABS.map((t, i) => (
               <button
                 key={t}
-                onClick={() => setTab(i)}
+                onClick={() => {
+                  if (i === tab) return;
+                  track("Tab Changed", { tab: t, from_tab: TABS[tab] });
+                  setTab(i);
+                }}
                 className={`relative px-3 py-2 text-[13px] font-medium ${
                   tab === i ? "text-primary" : "text-muted-foreground hover:text-foreground"
                 }`}
@@ -1513,7 +1583,10 @@ export function PricingDashboard() {
                 <Download className="h-3.5 w-3.5" /> Download CSV
               </button>
               <button
-                onClick={() => setBulkOpen(true)}
+                onClick={() => {
+                  setBulkOpen(true);
+                  track("Bulk Upload Opened");
+                }}
                 className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input bg-background px-3 text-[12px] font-medium hover:bg-muted"
               >
                 <Upload className="h-3.5 w-3.5" /> Bulk Upload
@@ -1834,7 +1907,7 @@ export function PricingDashboard() {
             const failed = lastBulkFailures.current;
             if (failed.length === 0) return;
             setBulkOpen(false);
-            await runBulkApply(failed);
+            await runBulkApply(failed, { isRetry: true });
           }}
         />
       )}
@@ -1888,13 +1961,30 @@ function BulkUploadModal({
     setBusy(true);
     try {
       const text = await file.text();
-      const updates = parseBulkPriceUpdates(text);
-      if (updates.length === 0) {
-        const { toast } = await import("sonner");
+      const parsed = parseBulkPriceUpload(text);
+      const { toast } = await import("sonner");
+      if (parsed.formulaCellCount > 0 && parsed.grnValueCount === 0) {
+        toast.error(
+          `${parsed.formulaCellCount} cell(s) still have Excel formulas (VLOOKUP) or #N/A. Copy the GRN column → Paste special → Values, save as CSV, then upload again. Formulas are not saved.`,
+        );
+        return;
+      }
+      if (parsed.updates.length === 0) {
         toast.error("No valid rows. Use the downloaded CSV and fill Quoted PP, Negotiated PP, Blinkit SP, or GRN ₹/kg.");
         return;
       }
-      await onApply(updates);
+      if (parsed.formulaCellCount > 0) {
+        toast.error(
+          `${parsed.formulaCellCount} cell(s) still have Excel formulas (VLOOKUP) or #N/A. Those cells were skipped. Paste values before upload.`,
+        );
+      } else if (!parsed.detectedGrnColumn) {
+        toast.warning(
+          "No GRN ₹/kg column recognized. Blinkit SP / Quoted PP will still save if present. Use the Download CSV header, or name the column GRN ₹/kg or GRN/kg.",
+        );
+      } else if (parsed.grnValueCount === 0) {
+        toast.warning("GRN ₹/kg column is present but every cell is empty, so GRN will not change.");
+      }
+      await onApply(parsed.updates);
     } catch (e) {
       const { toast } = await import("sonner");
       toast.error(`Parse failed: ${(e as Error).message}`);
@@ -1906,7 +1996,8 @@ function BulkUploadModal({
     <Modal onClose={onClose} title="Bulk upload prices">
       <p className="text-[12px] text-muted-foreground">
         Upload the same file as <strong>Download CSV</strong>. Edit Quoted PP, Negotiated PP,
-        Blinkit SP, and GRN ₹/kg, then upload. Other columns in the file are ignored. After save,
+        Blinkit SP, and GRN ₹/kg, then upload. If you used VLOOKUP, paste <strong>values</strong>{" "}
+        first (formulas and #N/A are ignored). Other columns in the file are ignored. After save,
         NLC, GM, PI%, GRN ₹/unit, Total GRN, GRN Diff, GRN markup, deflection, and impact are
         recalculated from those values.
       </p>
@@ -3404,14 +3495,20 @@ function UploadPanel({ kind }: { kind: "demand" | "sku" }) {
           }
         }
         toast.success(`Demand uploaded — ${inserted} rows`);
+        track("Demand Uploaded", { row_count: inserted, success: true });
       } else {
         const text = await file.text();
         const count = await upsertFsnCostComponentsFromCsv(text, city || undefined);
         toast.success(`FSN cost components saved — ${count} rows`);
+        track("SKU Costs Uploaded", { row_count: count, success: true });
       }
       setFile(null);
     } catch (e) {
       toast.error(`Upload failed: ${(e as Error).message}`);
+      track(kind === "demand" ? "Demand Uploaded" : "SKU Costs Uploaded", {
+        success: false,
+        error: (e as Error).message,
+      });
     } finally {
       setUploading(false);
     }
@@ -3729,8 +3826,10 @@ function SkuConfigTab() {
       }
       const count = await upsertFsnCostComponentsFromCsv(text, city || undefined);
       toast.success(`Saved ${count} FSN cost component rows`);
+      track("SKU Costs Uploaded", { row_count: count, success: true });
     } catch (e) {
       toast.error(`Upload failed: ${(e as Error).message}`);
+      track("SKU Costs Uploaded", { success: false, error: (e as Error).message });
     } finally {
       setUploading(false);
       setFile(null);
@@ -4337,7 +4436,7 @@ function PriceApprovalTab({
           <div className="mt-4 flex justify-end gap-2">
             <button onClick={() => setApproveOpen(false)} className="h-8 rounded-md border border-input px-3 text-[12px] hover:bg-muted">Cancel</button>
             <button
-              onClick={() => { setStatus("approved"); setApproveOpen(false); }}
+              onClick={() => { setStatus("approved"); setApproveOpen(false); track("Sheet Approved", { success: true }); }}
               className="h-8 rounded-md bg-green-600 px-3 text-[12px] font-medium text-white hover:bg-green-700"
             >Approve</button>
           </div>
@@ -4359,7 +4458,7 @@ function PriceApprovalTab({
             <button onClick={() => setRejectOpen(false)} className="h-8 rounded-md border border-input px-3 text-[12px] hover:bg-muted">Cancel</button>
             <button
               disabled={localReason.trim().length < 10}
-              onClick={() => { setRejectionReason(localReason.trim()); setStatus("rejected"); setRejectOpen(false); }}
+              onClick={() => { setRejectionReason(localReason.trim()); setStatus("rejected"); setRejectOpen(false); track("Sheet Rejected", { success: true }); }}
               className="h-8 rounded-md bg-red-600 px-3 text-[12px] font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
             >Submit Rejection</button>
           </div>
@@ -4806,8 +4905,10 @@ function GuardRailsTab() {
         deflection_target: Math.abs(next.defl),
       });
       toast.success("Saved Successfully");
+      track("Guardrails Saved", { success: true });
     } catch (e) {
       toast.error(`Save failed: ${(e as Error).message}`);
+      track("Guardrails Saved", { success: false, error: (e as Error).message });
     }
   };
 

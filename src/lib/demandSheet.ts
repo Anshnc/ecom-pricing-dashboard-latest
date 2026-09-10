@@ -657,7 +657,7 @@ async function runDemandQuery(deliveryDate: string, city: string): Promise<Parti
 }
 
 export const fetchDemandForPricingSheet = createServerFn({ method: "POST" })
-  .validator(
+  .inputValidator(
     z.object({
       deliveryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       city: z.string().min(1),

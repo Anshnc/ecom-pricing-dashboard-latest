@@ -249,7 +249,7 @@ export async function resolveFsnWeightUnits(
  * Server-only: FSN → preferred WeightUnitName from vormir/asgard MySQL.
  */
 export const fetchFsnWeightUnitLookup = createServerFn({ method: "POST" })
-  .validator(
+  .inputValidator(
     z.object({
       fsnIds: z.array(z.string()),
       city: z.string().min(1),
@@ -265,7 +265,7 @@ export const fetchFsnWeightUnitLookup = createServerFn({ method: "POST" })
 
 /** @deprecated Prefer loadFsnWeightUnitLookup — kept for enrichRows helpers. */
 export const fetchFsnWeightUnitMap = createServerFn({ method: "POST" })
-  .validator(
+  .inputValidator(
     z.object({
       fsnIds: z.array(z.string()),
       city: z.string().min(1),
