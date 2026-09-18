@@ -1,26 +1,18 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useNavigate } from "@tanstack/react-router";
 
+import { LoginPage } from "@/components/auth/LoginPage";
 import { isAuthenticated } from "@/lib/auth";
 
+/** Renders the sign-in form until a session exists. Never mounts the dashboard first. */
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const navigate = useNavigate();
-  const [allowed, setAllowed] = useState<boolean | null>(null);
+  const [allowed, setAllowed] = useState(false);
 
   useEffect(() => {
-    const ok = isAuthenticated();
-    setAllowed(ok);
-    if (!ok) {
-      void navigate({ to: "/login", replace: true });
-    }
-  }, [navigate]);
+    setAllowed(isAuthenticated());
+  }, []);
 
-  if (allowed !== true) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-muted/30">
-        <div className="text-sm text-muted-foreground">Checking session…</div>
-      </div>
-    );
+  if (!allowed) {
+    return <LoginPage onSuccess={() => setAllowed(true)} />;
   }
 
   return children;

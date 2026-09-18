@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { isAuthenticated, login } from "@/lib/auth";
 
-export function LoginPage() {
+export function LoginPage({ onSuccess }: { onSuccess?: () => void } = {}) {
   const navigate = useNavigate();
   const [id, setId] = useState("");
   const [password, setPassword] = useState("");
@@ -15,11 +15,19 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  useEffect(() => {
-    if (isAuthenticated()) {
-      void navigate({ to: "/", replace: true });
+  const finish = () => {
+    if (onSuccess) {
+      onSuccess();
+      return;
     }
-  }, [navigate]);
+    void navigate({ to: "/", replace: true });
+  };
+
+  useEffect(() => {
+    if (isAuthenticated()) finish();
+    // Only run on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
@@ -31,7 +39,7 @@ export function LoginPage() {
       setError("Invalid ID or password.");
       return;
     }
-    void navigate({ to: "/", replace: true });
+    finish();
   };
 
   return (
