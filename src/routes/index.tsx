@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { RequireAuth } from "@/components/auth/RequireAuth";
 import { PricingDashboard } from "@/components/pricing/PricingDashboard";
 
 export const Route = createFileRoute("/")({
@@ -12,5 +13,9 @@ export const Route = createFileRoute("/")({
 });
 
 function Index() {
-  return <PricingDashboard />;
+  return (
+    <RequireAuth>
+      <PricingDashboard />
+    </RequireAuth>
+  );
 }

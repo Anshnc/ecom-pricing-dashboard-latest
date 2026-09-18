@@ -47,7 +47,10 @@ import {
   Minimize2,
   Calculator,
   ChevronLeft,
+  LogOut,
 } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import { LOGIN_ID, logout as signOut } from "@/lib/auth";
 import { formatLocalISO, loadPricingSheetDemand, todayISO, upsertDemandUploadRows } from "@/lib/pricingSheetCache";
 import { useFrozenSort, type SortDir } from "@/hooks/useFrozenSort";
 import {
@@ -72,7 +75,7 @@ import {
   recordLockAudit,
   type PricingSheetAuditRow,
 } from "@/lib/pricingAudit";
-import { initAnalytics, setAnalyticsContext, track } from "@/lib/analytics";
+import { AnalyticsEvent, fireMixpanelPing, initAnalytics, setAnalyticsContext, track } from "@/lib/analytics";
 const TABLE_ZOOM_MIN = 50;
 const TABLE_ZOOM_MAX = 100;
 
@@ -502,6 +505,7 @@ function SortHeader({
 
 // ---------- Main ----------
 export function PricingDashboard() {
+  const navigate = useNavigate();
   const [tab, setTab] = useState(0);
   const [deliveryDate, setDeliveryDate] = useState(tomorrowISO());
   const [city, setCity] = useState("Bengaluru");
@@ -512,7 +516,7 @@ export function PricingDashboard() {
 
   useEffect(() => {
     void initAnalytics().then(() => {
-      track("Dashboard Viewed");
+      track(AnalyticsEvent.DashboardViewed);
     });
   }, []);
 
@@ -765,7 +769,7 @@ export function PricingDashboard() {
       setLockedViolationFsnIds(new Set(matched.map(({ row }) => row.fsnId)));
     }
     setFilterOpen(false);
-    track("Violation Filter Applied", {
+    track(AnalyticsEvent.ViolationFilterApplied, {
       filters: [...fs],
       match_count: matched.length,
     });
@@ -787,7 +791,7 @@ export function PricingDashboard() {
       setLockedSubcategoryFsnIds(new Set(matched.map(({ row }) => row.fsnId)));
     }
     setSubcatFilterOpen(false);
-    track("Subcategory Filter Applied", {
+    track(AnalyticsEvent.SubcategoryFilterApplied, {
       subcategory_count: subs.size,
       match_count: matched.length,
     });
@@ -1046,7 +1050,7 @@ export function PricingDashboard() {
   const [bulkFailuresVersion, setBulkFailuresVersion] = useState(0);
 
   const runBulkApply = async (updates: BulkUpdate[], opts?: { isRetry?: boolean }) => {
-    track("Bulk Upload Started", {
+    track(AnalyticsEvent.BulkUploadStarted, {
       row_count: updates.length,
       is_retry: !!opts?.isRetry,
     });
@@ -1118,7 +1122,7 @@ export function PricingDashboard() {
             ? `No matching rows. ${skippedUnmatched.length} FSN(s) in the file are not on this sheet.`
             : "No matching rows to update",
       );
-      track("Bulk Upload Completed", {
+      track(AnalyticsEvent.BulkUploadCompleted, {
         saved: 0,
         failed: 0,
         skipped_unmatched: skippedUnmatched.length,
@@ -1211,7 +1215,7 @@ export function PricingDashboard() {
         },
       });
     }
-    track("Bulk Upload Completed", {
+    track(AnalyticsEvent.BulkUploadCompleted, {
       saved: total - failed.length,
       failed: failed.length,
       skipped_unmatched: skippedUnmatched.length,
@@ -1238,7 +1242,7 @@ export function PricingDashboard() {
         await checkSheetExists();
         setSheetCreated(true);
         toast.success("Pricing sheet loaded (cached)", { id: "demand-fetch" });
-        track("Sheet Loaded", {
+        track(AnalyticsEvent.SheetLoaded, {
           action: showCreate ? "create" : "fetch",
           source: "cache",
         });
@@ -1250,7 +1254,7 @@ export function PricingDashboard() {
         await dbRefetch();
         await checkSheetExists();
         setSheetCreated(true);
-        track("Sheet Loaded", {
+        track(AnalyticsEvent.SheetLoaded, {
           action: showCreate ? "create" : "fetch",
           source: result.source,
           row_count: 0,
@@ -1263,14 +1267,14 @@ export function PricingDashboard() {
       setSheetCreated(true);
       if (status === "draft") setStatus("created");
       toast.success(`Pricing sheet ready — ${result.rowCount} rows from demand`, { id: "demand-fetch" });
-      track("Sheet Loaded", {
+      track(AnalyticsEvent.SheetLoaded, {
         action: showCreate ? "create" : "fetch",
         source: result.source,
         row_count: result.rowCount,
       });
     } catch (e) {
       toast.error(`Failed to build sheet from demand: ${(e as Error).message}`, { id: "demand-fetch" });
-      track("Sheet Load Failed", { error: (e as Error).message });
+      track(AnalyticsEvent.SheetLoadFailed, { error: (e as Error).message });
     } finally {
       setSheetBusy(false);
     }
@@ -1293,7 +1297,7 @@ export function PricingDashboard() {
     a.click();
     URL.revokeObjectURL(url);
     import("sonner").then(({ toast }) => toast.success("FK Sheet download started"));
-    track("FK Sheet Downloaded", { sku_count: rows.length });
+    track(AnalyticsEvent.FkSheetDownloaded, { sku_count: rows.length });
   };
 
   const onConfirmSubmit = async () => {
@@ -1316,11 +1320,11 @@ export function PricingDashboard() {
       await dbSubmit();
       const { toast } = await import("sonner");
       toast.success("Submitted for approval");
-      track("Price Confirmed", { sku_count: skuCount, success: true });
+      track(AnalyticsEvent.PriceConfirmed, { sku_count: skuCount, success: true });
     } catch (e) {
       const { toast } = await import("sonner");
       toast.error(`Submit failed: ${(e as Error).message}`);
-      track("Price Confirmed", { sku_count: skuCount, success: false });
+      track(AnalyticsEvent.PriceConfirmed, { sku_count: skuCount, success: false });
     }
     void dbUpdateRow; void dbRefetch;
   };
@@ -1379,8 +1383,21 @@ export function PricingDashboard() {
             </div>
           ))}
         </nav>
-        <div className="border-t border-sidebar-border px-4 py-3 text-[11px] text-sidebar-foreground/60">
-          v2.14.0 · Internal
+        <div className="border-t border-sidebar-border px-4 py-3">
+          <div className="truncate text-[11px] text-sidebar-foreground/70" title={LOGIN_ID}>
+            {LOGIN_ID}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              signOut();
+              void navigate({ to: "/login" });
+            }}
+            className="mt-2 flex w-full items-center gap-2 rounded-md px-0 py-1 text-[12px] text-sidebar-foreground/80 hover:text-white"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            Sign out
+          </button>
         </div>
       </aside>
 
@@ -1414,6 +1431,18 @@ export function PricingDashboard() {
               </>
             )}
             <div className="grid h-7 w-7 place-items-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">PR</div>
+            <button
+              type="button"
+              onClick={() => {
+                signOut();
+                void navigate({ to: "/login" });
+              }}
+              className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] text-muted-foreground hover:bg-muted hover:text-foreground md:hidden"
+              title="Sign out"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Sign out</span>
+            </button>
           </div>
         </header>
 
@@ -1421,8 +1450,22 @@ export function PricingDashboard() {
           {/* Title + tabs */}
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h1 className="text-xl font-semibold tracking-tight">Ecom Pricing</h1>
-            <div className="text-[12px] text-muted-foreground">
-              {city} · Delivery {deliveryDate}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const checkCode = fireMixpanelPing();
+                  void import("sonner").then(({ toast }) =>
+                    toast.success(`Mixpanel ping sent — search ${checkCode}`),
+                  );
+                }}
+                className="h-8 rounded-md border border-input bg-background px-3 text-[12px] font-medium hover:bg-muted"
+              >
+                Test Mixpanel
+              </button>
+              <div className="text-[12px] text-muted-foreground">
+                {city} · Delivery {deliveryDate}
+              </div>
             </div>
           </div>
 
@@ -1433,7 +1476,7 @@ export function PricingDashboard() {
                 key={t}
                 onClick={() => {
                   if (i === tab) return;
-                  track("Tab Changed", { tab: t, from_tab: TABS[tab] });
+                  track(AnalyticsEvent.TabChanged, { tab: t, from_tab: TABS[tab] });
                   setTab(i);
                 }}
                 className={`relative px-3 py-2 text-[13px] font-medium ${
@@ -1585,7 +1628,7 @@ export function PricingDashboard() {
               <button
                 onClick={() => {
                   setBulkOpen(true);
-                  track("Bulk Upload Opened");
+                  track(AnalyticsEvent.BulkUploadOpened);
                 }}
                 className="inline-flex h-8 items-center gap-1.5 rounded-md border border-input bg-background px-3 text-[12px] font-medium hover:bg-muted"
               >
@@ -3495,17 +3538,17 @@ function UploadPanel({ kind }: { kind: "demand" | "sku" }) {
           }
         }
         toast.success(`Demand uploaded — ${inserted} rows`);
-        track("Demand Uploaded", { row_count: inserted, success: true });
+        track(AnalyticsEvent.DemandUploaded, { row_count: inserted, success: true });
       } else {
         const text = await file.text();
         const count = await upsertFsnCostComponentsFromCsv(text, city || undefined);
         toast.success(`FSN cost components saved — ${count} rows`);
-        track("SKU Costs Uploaded", { row_count: count, success: true });
+        track(AnalyticsEvent.SkuCostsUploaded, { row_count: count, success: true });
       }
       setFile(null);
     } catch (e) {
       toast.error(`Upload failed: ${(e as Error).message}`);
-      track(kind === "demand" ? "Demand Uploaded" : "SKU Costs Uploaded", {
+      track(kind === "demand" ? AnalyticsEvent.DemandUploaded : AnalyticsEvent.SkuCostsUploaded, {
         success: false,
         error: (e as Error).message,
       });
@@ -3826,10 +3869,10 @@ function SkuConfigTab() {
       }
       const count = await upsertFsnCostComponentsFromCsv(text, city || undefined);
       toast.success(`Saved ${count} FSN cost component rows`);
-      track("SKU Costs Uploaded", { row_count: count, success: true });
+      track(AnalyticsEvent.SkuCostsUploaded, { row_count: count, success: true });
     } catch (e) {
       toast.error(`Upload failed: ${(e as Error).message}`);
-      track("SKU Costs Uploaded", { success: false, error: (e as Error).message });
+      track(AnalyticsEvent.SkuCostsUploaded, { success: false, error: (e as Error).message });
     } finally {
       setUploading(false);
       setFile(null);
@@ -4436,7 +4479,7 @@ function PriceApprovalTab({
           <div className="mt-4 flex justify-end gap-2">
             <button onClick={() => setApproveOpen(false)} className="h-8 rounded-md border border-input px-3 text-[12px] hover:bg-muted">Cancel</button>
             <button
-              onClick={() => { setStatus("approved"); setApproveOpen(false); track("Sheet Approved", { success: true }); }}
+              onClick={() => { setStatus("approved"); setApproveOpen(false); track(AnalyticsEvent.SheetApproved, { success: true }); }}
               className="h-8 rounded-md bg-green-600 px-3 text-[12px] font-medium text-white hover:bg-green-700"
             >Approve</button>
           </div>
@@ -4458,7 +4501,7 @@ function PriceApprovalTab({
             <button onClick={() => setRejectOpen(false)} className="h-8 rounded-md border border-input px-3 text-[12px] hover:bg-muted">Cancel</button>
             <button
               disabled={localReason.trim().length < 10}
-              onClick={() => { setRejectionReason(localReason.trim()); setStatus("rejected"); setRejectOpen(false); track("Sheet Rejected", { success: true }); }}
+              onClick={() => { setRejectionReason(localReason.trim()); setStatus("rejected"); setRejectOpen(false); track(AnalyticsEvent.SheetRejected, { success: true }); }}
               className="h-8 rounded-md bg-red-600 px-3 text-[12px] font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
             >Submit Rejection</button>
           </div>
@@ -4905,10 +4948,10 @@ function GuardRailsTab() {
         deflection_target: Math.abs(next.defl),
       });
       toast.success("Saved Successfully");
-      track("Guardrails Saved", { success: true });
+      track(AnalyticsEvent.GuardrailsSaved, { success: true });
     } catch (e) {
       toast.error(`Save failed: ${(e as Error).message}`);
-      track("Guardrails Saved", { success: false, error: (e as Error).message });
+      track(AnalyticsEvent.GuardrailsSaved, { success: false, error: (e as Error).message });
     }
   };
 
