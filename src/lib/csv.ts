@@ -5,7 +5,7 @@
 export function parseCSV(text: string): Record<string, string>[] {
   const rows = parseCSVMatrix(text);
   if (rows.length === 0) return [];
-  const header = rows[0].map((h) => h.trim());
+  const header = rows[0].map((h) => h.replace(/^\uFEFF/, "").trim());
   return rows.slice(1).map((r) => {
     const obj: Record<string, string> = {};
     header.forEach((h, i) => { obj[h] = (r[i] ?? "").trim(); });
@@ -64,7 +64,14 @@ export function downloadCSV(filename: string, csv: string) {
 
 export const toNum = (v: unknown): number | null => {
   if (v === null || v === undefined || v === "") return null;
-  const n = typeof v === "number" ? v : Number(String(v).replace(/,/g, ""));
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const n = Number(
+    String(v)
+      .replace(/[₹]/g, "")
+      .replace(/\brs\.?/gi, "")
+      .replace(/,/g, "")
+      .trim(),
+  );
   return Number.isFinite(n) ? n : null;
 };
 
