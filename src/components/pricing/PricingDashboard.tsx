@@ -75,7 +75,7 @@ import {
   recordLockAudit,
   type PricingSheetAuditRow,
 } from "@/lib/pricingAudit";
-import { AnalyticsEvent, fireMixpanelPing, initAnalytics, setAnalyticsContext, track } from "@/lib/analytics";
+import { AnalyticsEvent, initAnalytics, setAnalyticsContext, track } from "@/lib/analytics";
 const TABLE_ZOOM_MIN = 50;
 const TABLE_ZOOM_MAX = 100;
 
@@ -1450,22 +1450,8 @@ export function PricingDashboard() {
           {/* Title + tabs */}
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h1 className="text-xl font-semibold tracking-tight">Ecom Pricing</h1>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  const checkCode = fireMixpanelPing();
-                  void import("sonner").then(({ toast }) =>
-                    toast.success(`Mixpanel ping sent — search ${checkCode}`),
-                  );
-                }}
-                className="h-8 rounded-md border border-input bg-background px-3 text-[12px] font-medium hover:bg-muted"
-              >
-                Test Mixpanel
-              </button>
-              <div className="text-[12px] text-muted-foreground">
-                {city} · Delivery {deliveryDate}
-              </div>
+            <div className="text-[12px] text-muted-foreground">
+              {city} · Delivery {deliveryDate}
             </div>
           </div>
 

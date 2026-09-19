@@ -15,7 +15,7 @@ import { fetchPriceSheetDetails, fetchPriceSheetHeader, mergeHeaderAndDetails } 
 import { downloadCSV, parseCSVMatrix, toCSV } from "@/lib/csv";
 import { enrichRowsWithMysqlWeightUnits, loadFsnWeightUnitLookup } from "@/lib/fsnWeightUnit";
 import { formatLocalISO } from "@/lib/pricingSheetCache";
-import { track } from "@/lib/analytics";
+import { AnalyticsEvent, track } from "@/lib/analytics";
 
 const CITIES = ["Bengaluru", "Chennai", "Coimbatore", "Hyderabad", "Mumbai", "Nashik", "Trichy"];
 const PAGE_SIZE = 50;
@@ -440,7 +440,7 @@ export function RaasCheckTab({
       if (skus.length === 0) {
         setUploadError("No pricing data found for this date/city.");
         setPendingFile(null);
-        track("RAAS Check Completed", { success: false, error: "no_pricing_data" });
+        track(AnalyticsEvent.RaasCheckCompleted, { success: false, error: "no_pricing_data" });
         return;
       }
       setToolSkus(skus);
@@ -451,7 +451,7 @@ export function RaasCheckTab({
       if (error) {
         setUploadError(error);
         setPendingFile(null);
-        track("RAAS Check Completed", { success: false, error: "parse_error" });
+        track(AnalyticsEvent.RaasCheckCompleted, { success: false, error: "parse_error" });
         return;
       }
       setPendingFile(null);
@@ -472,7 +472,7 @@ export function RaasCheckTab({
       setCompareRows(compared);
       setStatusFilter("all");
       setPage(1);
-      track("RAAS Check Completed", {
+      track(AnalyticsEvent.RaasCheckCompleted, {
         success: true,
         row_count: compared.length,
         mismatch_count: compared.filter((r) => r.status === "Price Mismatch").length,
@@ -480,7 +480,7 @@ export function RaasCheckTab({
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : "Failed to read the uploaded file.");
       setPendingFile(null);
-      track("RAAS Check Completed", {
+      track(AnalyticsEvent.RaasCheckCompleted, {
         success: false,
         error: e instanceof Error ? e.message : "unknown",
       });

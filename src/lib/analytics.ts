@@ -32,7 +32,6 @@ export const AnalyticsEvent = {
   RaasCheckCompleted: "RAAS Check Completed",
   SheetApproved: "Sheet Approved",
   SheetRejected: "Sheet Rejected",
-  RightNowTest: "Right Now Test",
 } as const;
 
 export type AnalyticsEventName = (typeof AnalyticsEvent)[keyof typeof AnalyticsEvent];
@@ -146,11 +145,4 @@ export function setAnalyticsContext(properties: Record<string, string | number |
     return;
   }
   void initAnalytics();
-}
-
-/** Fires a unique ping you can search for immediately in Mixpanel Events. */
-export function fireMixpanelPing(): string {
-  const checkCode = `CHECK-${Date.now().toString().slice(-6)}`;
-  track(AnalyticsEvent.RightNowTest, { check_code: checkCode, source: "ping_button" });
-  return checkCode;
 }
